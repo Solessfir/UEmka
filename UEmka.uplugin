@@ -1,0 +1,23 @@
+﻿{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.5.4",
+	"FriendlyName": "UEmka",
+	"Description": "Embeds the Umka scripting language into Unreal Engine",
+	"Category": "Utilities",
+	"CreatedBy": "Solessfir",
+	"CreatedByURL": "https://github.com/Solessfir",
+	"DocsURL": "https://github.com/Solessfir/UEmka",
+	"MarketplaceURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "UEmka",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		}
+	]
+}
