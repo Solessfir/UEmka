@@ -31,7 +31,7 @@ public class UEmka : ModuleRules
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Linux)
 		{
-			PublicAdditionalLibraries.Add(Path.Combine(LibPath, "libumka.a"));
+			PublicAdditionalLibraries.Add(Path.Combine(LibPath, "libumka_static_linux.a"));
 		}
 	}
 }
