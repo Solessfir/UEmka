@@ -41,7 +41,7 @@ typedef union
     uint64_t uintVal;
     void *ptrVal;
     double realVal;
-    float real32Val;
+    float real32Val;   // Not used in result slots
 } UmkaStackSlot;
 
 
@@ -155,6 +155,10 @@ typedef void *(*UmkaMakeStruct)                 (Umka *umka, const UmkaType *typ
 typedef const UmkaType *(*UmkaGetBaseType)      (const UmkaType *type);
 typedef const UmkaType *(*UmkaGetParamType)     (UmkaStackSlot *params, int index);
 typedef const UmkaType *(*UmkaGetResultType)    (UmkaStackSlot *params, UmkaStackSlot *result);
+typedef const UmkaType *(*UmkaGetFieldType)     (const UmkaType *structType, const char *fieldName);
+typedef const UmkaType *(*UmkaGetMapKeyType)    (const UmkaType *mapType);
+typedef const UmkaType *(*UmkaGetMapItemType)   (const UmkaType *mapType);
+typedef bool (*UmkaAddClosure)                  (Umka *umka, const char *name, UmkaExternFunc func, void *upvalue);
 
 
 typedef struct
@@ -192,7 +196,11 @@ typedef struct
     UmkaMakeStruct      umkaMakeStruct;
     UmkaGetBaseType     umkaGetBaseType;
     UmkaGetParamType    umkaGetParamType;
-    UmkaGetResultType   umkaGetResultType;    
+    UmkaGetResultType   umkaGetResultType; 
+    UmkaGetFieldType    umkaGetFieldType;
+    UmkaGetMapKeyType   umkaGetMapKeyType;
+    UmkaGetMapItemType  umkaGetMapItemType;
+    UmkaAddClosure      umkaAddClosure;   
 } UmkaAPI;
 
 
@@ -230,6 +238,10 @@ UMKA_API void *umkaMakeStruct               (Umka *umka, const UmkaType *type);
 UMKA_API const UmkaType *umkaGetBaseType    (const UmkaType *type);
 UMKA_API const UmkaType *umkaGetParamType   (UmkaStackSlot *params, int index);
 UMKA_API const UmkaType *umkaGetResultType  (UmkaStackSlot *params, UmkaStackSlot *result);
+UMKA_API const UmkaType *umkaGetFieldType   (const UmkaType *structType, const char *fieldName);
+UMKA_API const UmkaType *umkaGetMapKeyType  (const UmkaType *mapType);
+UMKA_API const UmkaType *umkaGetMapItemType (const UmkaType *mapType);
+UMKA_API bool umkaAddClosure                (Umka *umka, const char *name, UmkaExternFunc func, void *upvalue);
 
 
 static inline UmkaAPI *umkaGetAPI(Umka *umka)
