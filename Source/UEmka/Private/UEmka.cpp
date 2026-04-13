@@ -1,4 +1,4 @@
-﻿// Copyright Solessfir. All Rights Reserved.
+﻿// Copyright Solessfir 2026. All Rights Reserved.
 
 #include "UEmka.h"
 

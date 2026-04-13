@@ -1,4 +1,4 @@
-﻿// Copyright Solessfir. All Rights Reserved.
+﻿// Copyright Solessfir 2026. All Rights Reserved.
 
 using UnrealBuildTool;
 using System.IO;
