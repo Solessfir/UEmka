@@ -80,16 +80,16 @@ class UEMKA_API UUEmkaFunctionLibrary : public UBlueprintFunctionLibrary
 
 public:
 	// Used by UK2Node_UEmka ExpandNode only. Executes a script inline with ordered typed parameters.
-	UFUNCTION(BlueprintCallable, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"))
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
 	static bool RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, EUEmkaValueType ResultType, bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error);
 
 	// Used by UK2Node_UEmka ExpandNode only for multi-return functions (fn foo*(): (int, str)).
 	// ResultTypes is a comma-separated list of EUEmkaValueType integer values (e.g. "0,12" for int, str).
-	UFUNCTION(BlueprintCallable, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"))
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
 	static bool RunUmkaInlineMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error);
 
 	// Index into the multi-return Results array from RunUmkaInlineMulti.
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam GetMultiResultAt(const TArray<FUEmkaScriptParam>& Results, const int32 Index);
 
 	// Compile-only check - no execution. Used by UK2Node_UEmka for static validation.
@@ -99,76 +99,76 @@ public:
 	// --- Param construction helpers (ExpandNode intermediate graph only) ---
 
 	// Covers: int, int8, int16, int32, uint8, uint16, uint32, uint, char
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeIntParam(EUEmkaValueType Type, int64 Value);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeBoolParam(bool Value);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeRealParam(double Value);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeReal32Param(float Value);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeStrParam(const FString& Value);
 
 	// --- Result extraction helpers (ExpandNode intermediate graph only) ---
 
 	// Covers uint (int64 output pin)
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static int64 GetIntResult(const FUEmkaScriptParam& Result);
 
 	// Covers int, int8..int32, uint8..uint32, bool, char (int32 output pin)
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static int32 GetInt32Result(const FUEmkaScriptParam& Result);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static double GetRealResult(const FUEmkaScriptParam& Result);
 
 	// real32 result comes back in realVal (not real32Val), returns as float
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static float GetReal32Result(const FUEmkaScriptParam& Result);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FString GetStrResult(const FUEmkaScriptParam& Result);
 
 	// --- Array param construction helpers (ExpandNode intermediate graph only) ---
 
 	// []int, []int8..[]uint32, []bool, []char - BP pin is TArray<int> (int32)
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeIntArrayParam(EUEmkaValueType Type, const TArray<int32>& Values);
 
 	// []uint - BP pin is TArray<int64>
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeInt64ArrayParam(EUEmkaValueType Type, const TArray<int64>& Values);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeRealArrayParam(const TArray<double>& Values);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeReal32ArrayParam(const TArray<float>& Values);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeStrArrayParam(const TArray<FString>& Values);
 
 	// --- Array result extraction helpers (ExpandNode intermediate graph only) ---
 
 	// []int, []int8..[]uint32, []bool, []char - returns TArray<int> (int32)
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<int32> GetInt32ArrayResult(const FUEmkaScriptParam& Result);
 
 	// []uint - returns TArray<int64>
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<int64> GetIntArrayResult(const FUEmkaScriptParam& Result);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<double> GetRealArrayResult(const FUEmkaScriptParam& Result);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<float> GetReal32ArrayResult(const FUEmkaScriptParam& Result);
 
-	UFUNCTION(BlueprintPure, Category = "UEmka", Meta = (BlueprintInternalUseOnly = true))
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<FString> GetStrArrayResult(const FUEmkaScriptParam& Result);
 };

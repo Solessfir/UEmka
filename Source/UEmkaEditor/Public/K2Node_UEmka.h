@@ -49,7 +49,7 @@ class UEMKAEDITOR_API UK2Node_UEmka : public UK2Node
 public:
 	// The Umka script stored inline on this node.
 	UPROPERTY()
-	FString Script = TEXT("fn Hello*(Str: str): str {\n\tres := \"Hello \" + Str\n\tprintf(\"%s\", res)\n\treturn res\n}");
+	FString Script = TEXT("fn Hello*(Str: str): str {\n    res := \"Hello \" + Str\n    printf(\"%s\", res)\n    return res\n}");
 
 	// UK2Node interface
 	virtual void AllocateDefaultPins() override;
