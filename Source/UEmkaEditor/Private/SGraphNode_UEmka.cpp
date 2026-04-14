@@ -77,14 +77,40 @@ FReply SGraphNode_UEmka::OnTextBoxKeyDown(const FGeometry& Geometry, const FKeyE
 {
 	if (KeyEvent.IsControlDown() && (KeyEvent.GetKey() == EKeys::Z || KeyEvent.GetKey() == EKeys::Y))
 	{
-		// Undo/redo doesn't fire OnTextChanged - schedule a one-shot deferred recheck
-		// so the error highlight is updated after the text reverts.
+		// Undo/redo doesn't fire OnTextChanged - schedule a one-shot deferred recheck so the error highlight is updated after the text reverts.
 		RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateSP(this, &SGraphNode_UEmka::RecheckAfterUndoRedo));
 		return FReply::Unhandled();
 	}
 
 	if (KeyEvent.GetKey() == EKeys::Tab && CodeEditor.IsValid())
 	{
+		if (KeyEvent.IsShiftDown())
+		{
+			const FTextLocation CursorLoc = CodeEditor->GetCursorLocation();
+			const int32 LineIndex = CursorLoc.GetLineIndex();
+
+			TArray<FString> Lines;
+			CodeEditor->GetText().ToString().ParseIntoArrayLines(Lines, false);
+
+			if (Lines.IsValidIndex(LineIndex))
+			{
+				FString& Line = Lines[LineIndex];
+				int32 SpacesRemoved = 0;
+				while (SpacesRemoved < 4 && Line.Len() > 0 && Line[0] == TEXT(' '))
+				{
+					Line.RemoveAt(0);
+					++SpacesRemoved;
+				}
+
+				if (SpacesRemoved > 0)
+				{
+					CodeEditor->SetText(FText::FromString(FString::Join(Lines, TEXT("\n"))));
+					CodeEditor->GoTo(FTextLocation(LineIndex, FMath::Max(0, CursorLoc.GetOffset() - SpacesRemoved)));
+				}
+			}
+			return FReply::Handled();
+		}
+
 		CodeEditor->InsertTextAtCursor(TEXT("    "));
 		return FReply::Handled();
 	}
