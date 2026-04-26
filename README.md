@@ -10,13 +10,11 @@
 
 [The Umka Language Reference](https://github.com/vtereshkov/umka-lang/blob/master/doc/lang.md)
 
----
 
 ## Installation
 
 Get `UEmka.zip` from the [releases](https://github.com/Solessfir/UEmka/releases) and extract it into your project's `Plugins` folder.
 
----
 
 ## Usage
 
@@ -25,7 +23,6 @@ Search for **Umka Script** in the Blueprint node palette and place it in any eve
 The node contains an inline code editor. Write an exported Umka function and the node will automatically generate typed input and output pins matching its signature.
 
 
----
 
 ## Writing Scripts
 
@@ -168,7 +165,6 @@ fn fib*(n: int): int {
 
 This generates one `Integer64` input pin (`n`) and one `Integer64` output pin.
 
----
 
 ## Debugging
 
@@ -185,7 +181,6 @@ fn foo*(x: int): int {
 LogUEmka: [foo] input: 42
 ```
 
----
 
 ## Error Handling
 
@@ -193,7 +188,6 @@ LogUEmka: [foo] input: 42
 
 **Runtime:** If the script fails during execution, the error is logged to the Output Log under the `LogUEmka` category, including the calling Blueprint path and function name.
 
----
 
 ## Limitations
 
