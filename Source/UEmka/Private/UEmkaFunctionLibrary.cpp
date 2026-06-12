@@ -4,7 +4,9 @@
 #include "umka_api.h"
 #include UE_INLINE_GENERATED_CPP_BY_NAME(UEmkaFunctionLibrary)
 
-#if PLATFORM_WINDOWS
+#define UEMKA_CAPTURE_STDOUT ((PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC) && !NO_LOGGING)
+
+#if UEMKA_CAPTURE_STDOUT && PLATFORM_WINDOWS
 #include "Windows/WindowsHWrapper.h"
 #include <io.h>
 #include <fcntl.h>
@@ -14,7 +16,7 @@
 #define UMKA_CLOSE(fd)        _close(fd)
 #define UMKA_READ(fd, buf, n) _read(fd, buf, n)
 #define UMKA_FILENO(f)        _fileno(f)
-#elif PLATFORM_UNIX || PLATFORM_MAC
+#elif UEMKA_CAPTURE_STDOUT
 #include <unistd.h>
 #include <fcntl.h>
 #define UMKA_PIPE(fds, sz)    (pipe(fds) == 0)
@@ -234,7 +236,7 @@ static void PushUmkaParams(Umka* umka, const UmkaFuncContext& Context, const TAr
 	}
 }
 
-#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
+#if UEMKA_CAPTURE_STDOUT
 // RAII scope guard that redirects CRT stdout to an internal pipe for the duration of its lifetime.
 // Call FlushToLog() after umkaCall() to restore stdout and emit any captured printf output to UE_LOG.
 // The pipe's write end is non-blocking: once the buffer is full, further printf output is dropped.
@@ -444,13 +446,13 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 
 	// Redirect CRT stdout around umkaCall so printf() output lands in UE_LOG.
 	// printf is a VM builtin (not overridable via umkaAddFunc) so we capture at the fd level.
-	#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
+	#if UEMKA_CAPTURE_STDOUT
 	FUmkaStdoutCapture StdoutCapture;
 	#endif
 
 	const bool bSuccess = umkaCall(Vm.VM, &Vm.Context) == 0;
 
-	#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
+	#if UEMKA_CAPTURE_STDOUT
 	StdoutCapture.FlushToLog(FunctionName);
 	#endif
 
@@ -624,13 +626,13 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 
 	// Redirect CRT stdout around umkaCall so printf() output lands in UE_LOG.
 	// printf is a VM builtin (not overridable via umkaAddFunc) so we capture at the fd level.
-	#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
+	#if UEMKA_CAPTURE_STDOUT
 	FUmkaStdoutCapture StdoutCapture;
 	#endif
 
 	const bool bSuccess = umkaCall(Vm.VM, &Vm.Context) == 0;
 
-	#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
+	#if UEMKA_CAPTURE_STDOUT
 	StdoutCapture.FlushToLog(FunctionName);
 	#endif
 
