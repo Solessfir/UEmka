@@ -146,6 +146,28 @@ fn double*(nums: []int): []int {
 | `[]str`         | Array of String     |
 | `[]MyEnum` (user-defined enum) | Array of Byte |
 
+### Structs
+
+Structs declared in the script can be used in the exported function's signature. The node flattens them into one pin per field:
+
+```
+type Vec2 = struct { x, y: real }
+
+fn move*(p: Vec2, d: Vec2, scale: real): Vec2 {
+    return Vec2{x: p.x + d.x*scale, y: p.y + d.y*scale}
+}
+```
+
+This generates input pins `p.x`, `p.y`, `d.x`, `d.y` (Double), `scale` (Double), and two output pins `x`, `y` (Double) - one per field of the returned struct.
+
+Under the hood the node compiles a small wrapper function with a flat signature that packs the pins into struct values, calls your function, and unpacks the result. Your script is unchanged.
+
+**Constraints:**
+- Field types must be scalars: numbers, `bool`, `char`, `str`, or enums. Structs containing arrays, maps, nested structs, pointers, or function types cannot cross the pin boundary (they still work freely inside the script)
+- Struct arrays (`[]Vec2`) cannot be passed as pins
+- Structs inside a multi-return tuple (`fn f*(): (Vec2, int)`) are not supported - return the struct alone instead
+- The identifier `__uemka_call` is reserved for the generated wrapper
+
 ### Example - Fibonacci
 
 Computes the N-th Fibonacci number:
@@ -196,7 +218,9 @@ LogUEmka: [foo] input: 42
 
 The following Umka features are not currently supported as Blueprint pins:
 
-- **Structs** - custom `type Foo = struct { ... }` cannot be passed as pins
+- **Structs with complex fields** - structs containing arrays, maps, nested structs, pointers, or function types (scalar-field structs are flattened into pins, see [Structs](#structs))
+- **Struct arrays** - `[]Vec2` cannot be passed as pins
+- **Structs in multi-return tuples** - `fn f*(): (Vec2, int)` is not supported
 - **Maps** - `map[K]V` types are not supported
 - **Closures / function types** - `fn(int): int` cannot be passed as a pin
 - **Pointers** - `^type` and `weak ^type` are not supported
