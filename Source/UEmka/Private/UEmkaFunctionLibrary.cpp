@@ -52,7 +52,9 @@ static void StoreIntElem(void* Data, const int32 Index, const int64 ItemSize, co
 }
 
 // Loads a dynarray element as int64, using the declared type for width and sign extension.
-static int64 LoadIntElem(const void* Data, const int32 Index, const EUEmkaValueType Type)
+// Enum width follows the dynarray's itemSize - user enums may declare a smaller base type
+// (e.g. "type Tiny = enum (uint8)" has 1-byte elements).
+static int64 LoadIntElem(const void* Data, const int32 Index, const EUEmkaValueType Type, const int64 ItemSize)
 {
 	switch (Type)
 	{
@@ -65,7 +67,15 @@ static int64 LoadIntElem(const void* Data, const int32 Index, const EUEmkaValueT
 		case EUEmkaValueType::UInt16: return static_cast<const uint16*>(Data)[Index];
 		case EUEmkaValueType::UInt32: return static_cast<const uint32*>(Data)[Index];
 		case EUEmkaValueType::UInt:   return static_cast<int64>(static_cast<const uint64*>(Data)[Index]);
-		default:                      return static_cast<const int64*>(Data)[Index]; // Int, Enum
+		case EUEmkaValueType::Enum:
+			switch (ItemSize)
+			{
+				case 1:  return static_cast<const uint8*>(Data)[Index];
+				case 2:  return static_cast<const uint16*>(Data)[Index];
+				case 4:  return static_cast<const uint32*>(Data)[Index];
+				default: return static_cast<const int64*>(Data)[Index];
+			}
+		default:                      return static_cast<const int64*>(Data)[Index]; // Int
 	}
 }
 
@@ -363,7 +373,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 					Result.IntArrayValue.SetNum(Len);
 					for (int32 j = 0; j < Len; ++j)
 					{
-						Result.IntArrayValue[j] = LoadIntElem(StructuredResult.data, j, ResultType);
+						Result.IntArrayValue[j] = LoadIntElem(StructuredResult.data, j, ResultType, StructuredResult.itemSize);
 					}
 					break;
 				}
@@ -627,7 +637,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 						R.IntArrayValue.SetNum(Len);
 						for (int32 j = 0; j < Len; ++j)
 						{
-							R.IntArrayValue[j] = LoadIntElem(Header->data, j, T);
+							R.IntArrayValue[j] = LoadIntElem(Header->data, j, T, Header->itemSize);
 						}
 						break;
 					}
@@ -809,6 +819,19 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntArrayParam(EUEmkaValueType Type,
 	return P;
 }
 
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeByteArrayParam(EUEmkaValueType Type, const TArray<uint8>& Values)
+{
+	FUEmkaScriptParam P;
+	P.Type = Type;
+	P.bIsArray = true;
+	P.IntArrayValue.SetNum(Values.Num());
+	for (int32 i = 0; i < Values.Num(); ++i)
+	{
+		P.IntArrayValue[i] = Values[i];
+	}
+	return P;
+}
+
 FUEmkaScriptParam UUEmkaFunctionLibrary::MakeInt64ArrayParam(EUEmkaValueType Type, const TArray<int64>& Values)
 {
 	FUEmkaScriptParam P;
@@ -856,6 +879,17 @@ TArray<int32> UUEmkaFunctionLibrary::GetInt32ArrayResult(const FUEmkaScriptParam
 	for (int32 i = 0; i < Result.IntArrayValue.Num(); ++i)
 	{
 		Out[i] = static_cast<int32>(Result.IntArrayValue[i]);
+	}
+	return Out;
+}
+
+TArray<uint8> UUEmkaFunctionLibrary::GetByteArrayResult(const FUEmkaScriptParam& Result)
+{
+	TArray<uint8> Out;
+	Out.SetNum(Result.IntArrayValue.Num());
+	for (int32 i = 0; i < Result.IntArrayValue.Num(); ++i)
+	{
+		Out[i] = static_cast<uint8>(Result.IntArrayValue[i]);
 	}
 	return Out;
 }

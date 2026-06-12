@@ -136,9 +136,13 @@ public:
 
 	// --- Array param construction helpers (ExpandNode intermediate graph only) ---
 
-	// []int, []int8..[]uint32, []bool, []char - BP pin is TArray<int> (int32)
+	// []int8, []int16, []int32, []uint16, []uint32, []bool - BP pin is TArray<int> (int32)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeIntArrayParam(EUEmkaValueType Type, const TArray<int32>& Values);
+
+	// []uint8, []char, []MyEnum - BP pin is TArray<uint8> (Byte), matching the node's Array of Byte pin
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
+	static FUEmkaScriptParam MakeByteArrayParam(EUEmkaValueType Type, const TArray<uint8>& Values);
 
 	// []uint - BP pin is TArray<int64>
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
@@ -155,9 +159,13 @@ public:
 
 	// --- Array result extraction helpers (ExpandNode intermediate graph only) ---
 
-	// []int, []int8..[]uint32, []bool, []char - returns TArray<int> (int32)
+	// []int8, []int16, []int32, []uint16, []uint32, []bool - returns TArray<int> (int32)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<int32> GetInt32ArrayResult(const FUEmkaScriptParam& Result);
+
+	// []uint8, []char, []MyEnum - returns TArray<uint8> (Byte)
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
+	static TArray<uint8> GetByteArrayResult(const FUEmkaScriptParam& Result);
 
 	// []uint - returns TArray<int64>
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")

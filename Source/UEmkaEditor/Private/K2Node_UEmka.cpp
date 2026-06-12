@@ -584,6 +584,9 @@ static FName GetGetResultFuncName(EUEmkaValueType RetType, bool bIsArray)
 		if (RetType == EUEmkaValueType::Real32)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetReal32ArrayResult);
 		if (RetType == EUEmkaValueType::Str)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetStrArrayResult);
 		if (RetType == EUEmkaValueType::Int || RetType == EUEmkaValueType::UInt) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetIntArrayResult);
+		if (RetType == EUEmkaValueType::UInt8
+		 || RetType == EUEmkaValueType::Char
+		 || RetType == EUEmkaValueType::Enum)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetByteArrayResult);
 		return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetInt32ArrayResult);
 	}
 
@@ -702,6 +705,9 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 					else if (Param.Type == EUEmkaValueType::Str)    MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrArrayParam);
 					else if (Param.Type == EUEmkaValueType::Int
 						  || Param.Type == EUEmkaValueType::UInt)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam);
+					else if (Param.Type == EUEmkaValueType::UInt8
+						  || Param.Type == EUEmkaValueType::Char
+						  || Param.Type == EUEmkaValueType::Enum)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeByteArrayParam);
 					else                                            MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntArrayParam);
 				}
 				else
@@ -717,10 +723,11 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 				MakeParamNode->FunctionReference.SetExternalMember(MakeFuncName, UUEmkaFunctionLibrary::StaticClass());
 				MakeParamNode->AllocateDefaultPins();
 
-				// MakeIntParam / MakeIntArrayParam / MakeInt64ArrayParam take an explicit Type enum
+				// MakeIntParam / MakeIntArrayParam / MakeInt64ArrayParam / MakeByteArrayParam take an explicit Type enum
 				if (MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntParam)
 					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntArrayParam)
-					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam))
+					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam)
+					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeByteArrayParam))
 				{
 					if (UEdGraphPin* TypePin = MakeParamNode->FindPin(TEXT("Type")))
 					{
