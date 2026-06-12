@@ -15,6 +15,11 @@
 	"Installed": true,
 	"Modules": [
 		{
+			"Name": "UmkaLib",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		},
+		{
 			"Name": "UEmka",
 			"Type": "Runtime",
 			"LoadingPhase": "PreDefault"

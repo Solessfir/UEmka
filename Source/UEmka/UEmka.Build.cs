@@ -1,7 +1,6 @@
-﻿// Copyright Solessfir 2026. All Rights Reserved.
+// Copyright Solessfir 2026. All Rights Reserved.
 
 using UnrealBuildTool;
-using System.IO;
 
 public class UEmka : ModuleRules
 {
@@ -18,20 +17,7 @@ public class UEmka : ModuleRules
 			}
 		);
 
-		string BasePath = Path.Combine(PluginDirectory, "Source", "ThirdParty");
-		string IncludePath = Path.Combine(BasePath, "include");
-		string LibPath = Path.Combine(BasePath, "lib", Target.Platform.ToString());
-
-		PublicIncludePaths.Add(IncludePath);
-		PublicDefinitions.AddRange(new string[] {"WITH_UMKA", "UMKA_STATIC"});
-
-		if (Target.Platform == UnrealTargetPlatform.Win64)
-		{
-			PublicAdditionalLibraries.Add(Path.Combine(LibPath, "libumka_static.lib"));
-		}
-		else if (Target.Platform == UnrealTargetPlatform.Linux)
-		{
-			PublicAdditionalLibraries.Add(Path.Combine(LibPath, "libumka_static_linux.a"));
-		}
+		// Umka interpreter, compiled from vendored sources - see Source/UmkaLib
+		PrivateDependencyModuleNames.Add("UmkaLib");
 	}
 }
