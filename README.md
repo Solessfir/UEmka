@@ -76,6 +76,8 @@ This generates a `Byte` input pin labeled `d (Direction)` and a `Byte` output pi
 
 The `type` definition must be present in the script - Umka requires it to compile. The named constants (`North`, `East`, etc.) are available anywhere in the script body.
 
+Enum arrays work as well: `[]Direction` maps to an Array of Byte pin. Enums with an explicit base type (`type Tiny = enum (uint8) { ... }`) are supported too.
+
 ### Multiple return values
 
 Wrap the return types in parentheses to get one output pin per value:
@@ -142,6 +144,7 @@ fn double*(nums: []int): []int {
 | `[]real`        | Array of Double     |
 | `[]real32`      | Array of Float      |
 | `[]str`         | Array of String     |
+| `[]MyEnum` (user-defined enum) | Array of Byte |
 
 ### Example - Fibonacci
 
@@ -195,7 +198,6 @@ The following Umka features are not currently supported as Blueprint pins:
 
 - **Structs** - custom `type Foo = struct { ... }` cannot be passed as pins
 - **Maps** - `map[K]V` types are not supported
-- **Enums as arrays** - `[]Color` array pins are not supported (scalar enum pins work fine)
 - **Closures / function types** - `fn(int): int` cannot be passed as a pin
 - **Pointers** - `^type` and `weak ^type` are not supported
 - **Pointers inside multi-return** - `fn foo*(): (^int, str)` is not supported
