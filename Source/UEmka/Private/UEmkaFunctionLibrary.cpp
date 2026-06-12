@@ -5,6 +5,7 @@
 #include UE_INLINE_GENERATED_CPP_BY_NAME(UEmkaFunctionLibrary)
 
 #if PLATFORM_WINDOWS
+#include "Windows/WindowsHWrapper.h"
 #include <io.h>
 #include <fcntl.h>
 #define UMKA_PIPE(fds, sz)    (_pipe(fds, sz, _O_BINARY) == 0)
@@ -15,6 +16,7 @@
 #define UMKA_FILENO(f)        _fileno(f)
 #elif PLATFORM_UNIX || PLATFORM_MAC
 #include <unistd.h>
+#include <fcntl.h>
 #define UMKA_PIPE(fds, sz)    (pipe(fds) == 0)
 #define UMKA_DUP(fd)          dup(fd)
 #define UMKA_DUP2(a, b)       dup2(a, b)
@@ -235,6 +237,8 @@ static void PushUmkaParams(Umka* umka, const UmkaFuncContext& Context, const TAr
 #if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
 // RAII scope guard that redirects CRT stdout to an internal pipe for the duration of its lifetime.
 // Call FlushToLog() after umkaCall() to restore stdout and emit any captured printf output to UE_LOG.
+// The pipe's write end is non-blocking: once the buffer is full, further printf output is dropped.
+// A blocking write end would hang the engine - nothing drains the pipe while umkaCall runs.
 struct FUmkaStdoutCapture
 {
 	static constexpr int32 BufSize = 64 * 1024;
@@ -242,16 +246,44 @@ struct FUmkaStdoutCapture
 	int32 SavedFd = -1;
 	bool bActive = false;
 
+	static bool MakeWriteEndNonBlocking(const int32 Fd)
+	{
+		#if PLATFORM_WINDOWS
+		// Anonymous pipes are named pipes internally - PIPE_NOWAIT makes a full-pipe
+		// write return immediately with 0 bytes written instead of blocking
+		HANDLE Handle = reinterpret_cast<HANDLE>(_get_osfhandle(Fd));
+		if (Handle == INVALID_HANDLE_VALUE)
+		{
+			return false;
+		}
+		DWORD Mode = PIPE_NOWAIT;
+		return SetNamedPipeHandleState(Handle, &Mode, nullptr, nullptr) != 0;
+		#else
+		const int32 Flags = fcntl(Fd, F_GETFL);
+		return Flags != -1 && fcntl(Fd, F_SETFL, Flags | O_NONBLOCK) != -1;
+		#endif
+	}
+
 	FUmkaStdoutCapture()
 	{
-		bActive = UMKA_FILENO(stdout) >= 0 && UMKA_PIPE(Pipe, BufSize);
-		if (bActive)
+		if (UMKA_FILENO(stdout) < 0 || !UMKA_PIPE(Pipe, BufSize))
 		{
-			SavedFd = UMKA_DUP(UMKA_FILENO(stdout));
-			UMKA_DUP2(Pipe[1], UMKA_FILENO(stdout));
-			UMKA_CLOSE(Pipe[1]);
-			Pipe[1] = -1;
+			return;
 		}
+
+		if (!MakeWriteEndNonBlocking(Pipe[1]))
+		{
+			UMKA_CLOSE(Pipe[0]);
+			UMKA_CLOSE(Pipe[1]);
+			Pipe[0] = Pipe[1] = -1;
+			return;
+		}
+
+		bActive = true;
+		SavedFd = UMKA_DUP(UMKA_FILENO(stdout));
+		UMKA_DUP2(Pipe[1], UMKA_FILENO(stdout));
+		UMKA_CLOSE(Pipe[1]);
+		Pipe[1] = -1;
 	}
 
 	// Restores stdout, reads the captured output, and emits each line to UE_LOG.
@@ -268,6 +300,9 @@ struct FUmkaStdoutCapture
 			UMKA_DUP2(SavedFd, UMKA_FILENO(stdout));
 			UMKA_CLOSE(SavedFd);
 			SavedFd = -1;
+			// A dropped write on the full pipe sets the stream's sticky error flag,
+			// which would silently disable all printf in the process from now on
+			clearerr(stdout);
 		}
 
 		if (Pipe[0] != -1)
@@ -277,6 +312,11 @@ struct FUmkaStdoutCapture
 			const int32 BytesRead = UMKA_READ(Pipe[0], Buf.GetData(), BufSize);
 			UMKA_CLOSE(Pipe[0]);
 			Pipe[0] = -1;
+
+			if (BytesRead == BufSize)
+			{
+				UE_LOG(LogUEmka, Warning, TEXT("[%s] printf output exceeded %d KB - excess was dropped"), *FunctionName, BufSize / 1024);
+			}
 			if (BytesRead > 0)
 			{
 				Buf[BytesRead] = '\0';
@@ -307,6 +347,7 @@ struct FUmkaStdoutCapture
 			fflush(stdout);
 			UMKA_DUP2(SavedFd, UMKA_FILENO(stdout));
 			UMKA_CLOSE(SavedFd);
+			clearerr(stdout);
 		}
 		if (Pipe[0] != -1)
 		{
