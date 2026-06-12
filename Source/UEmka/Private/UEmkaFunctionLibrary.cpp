@@ -87,7 +87,7 @@ static_assert(static_cast<int32>(EUEmkaValueType::Void) == 14, "EUEmkaValueType 
 
 // Pushes all input parameters onto the Umka function call stack.
 // ArrayHeaders must outlive umkaCall() - Umka holds raw pointers into the header data.
-static void PushUmkaParams(Umka* umka, UmkaFuncContext& Context, const TArray<FUEmkaScriptParam>& Params, TArray<FUmkaDynArrayHeader>& ArrayHeaders)
+static void PushUmkaParams(Umka* umka, const UmkaFuncContext& Context, const TArray<FUEmkaScriptParam>& Params, TArray<FUmkaDynArrayHeader>& ArrayHeaders)
 {
 	ArrayHeaders.Reserve(Params.Num());
 	for (int32 i = 0; i < Params.Num(); ++i)
@@ -259,7 +259,7 @@ struct FUmkaStdoutCapture
 };
 #endif
 
-bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, EUEmkaValueType ResultType, bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error)
+bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error)
 {
 	if (FunctionName.IsEmpty())
 	{
@@ -438,7 +438,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 
 // Returns the byte size Umka assigns to each primitive type in a struct field.
 // For all primitives, alignment = size, matching typeAlignmentRecompute in umka_types.c.
-static int32 UmkaTypeSize(EUEmkaValueType T)
+static int32 UmkaTypeSize(const EUEmkaValueType T)
 {
 	switch (T)
 	{
@@ -456,12 +456,15 @@ static int32 UmkaTypeSize(EUEmkaValueType T)
 }
 
 // Rounds X up to the nearest multiple of A - mirrors Umka's align() in umka_common.h.
-static int32 UmkaAlignUp(int32 X, int32 A) { return ((X + A - 1) / A) * A; }
+static int32 UmkaAlignUp(const int32 X, const int32 A)
+{
+	return ((X + A - 1) / A) * A;
+}
 
 // Returns the byte size and alignment of a field in a multi-return struct.
 // DynArray ([]T): size = 24 (type* + itemSize + data*), align = 8. Matches umka_types.c.
 // Primitives: align = size.
-static void UmkaFieldSizeAlign(EUEmkaValueType T, bool bIsArray, int32& OutSize, int32& OutAlign)
+static void UmkaFieldSizeAlign(const EUEmkaValueType T, const bool bIsArray, int32& OutSize, int32& OutAlign)
 {
 	if (bIsArray)
 	{
@@ -732,7 +735,7 @@ bool UUEmkaFunctionLibrary::CompileCheckScript(const FString& Script, FString& O
 // Param construction helpers
 // -------------------------------------------------------------------------
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntParam(EUEmkaValueType Type, int64 Value)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntParam(const EUEmkaValueType Type, const int64 Value)
 {
 	FUEmkaScriptParam P;
 	P.Type = Type;
@@ -740,7 +743,7 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntParam(EUEmkaValueType Type, int6
 	return P;
 }
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeBoolParam(bool Value)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeBoolParam(const bool Value)
 {
 	FUEmkaScriptParam P;
 	P.Type = EUEmkaValueType::Bool;
@@ -748,7 +751,7 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeBoolParam(bool Value)
 	return P;
 }
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeRealParam(double Value)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeRealParam(const double Value)
 {
 	FUEmkaScriptParam P;
 	P.Type = EUEmkaValueType::Real;
@@ -756,7 +759,7 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeRealParam(double Value)
 	return P;
 }
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeReal32Param(float Value)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeReal32Param(const float Value)
 {
 	FUEmkaScriptParam P;
 	P.Type = EUEmkaValueType::Real32;
@@ -806,7 +809,7 @@ FString UUEmkaFunctionLibrary::GetStrResult(const FUEmkaScriptParam& Result)
 // Array param construction helpers
 // -------------------------------------------------------------------------
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntArrayParam(EUEmkaValueType Type, const TArray<int32>& Values)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntArrayParam(const EUEmkaValueType Type, const TArray<int32>& Values)
 {
 	FUEmkaScriptParam P;
 	P.Type = Type;
@@ -819,7 +822,7 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeIntArrayParam(EUEmkaValueType Type,
 	return P;
 }
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeByteArrayParam(EUEmkaValueType Type, const TArray<uint8>& Values)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeByteArrayParam(const EUEmkaValueType Type, const TArray<uint8>& Values)
 {
 	FUEmkaScriptParam P;
 	P.Type = Type;
@@ -832,7 +835,7 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeByteArrayParam(EUEmkaValueType Type
 	return P;
 }
 
-FUEmkaScriptParam UUEmkaFunctionLibrary::MakeInt64ArrayParam(EUEmkaValueType Type, const TArray<int64>& Values)
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeInt64ArrayParam(const EUEmkaValueType Type, const TArray<int64>& Values)
 {
 	FUEmkaScriptParam P;
 	P.Type = Type;

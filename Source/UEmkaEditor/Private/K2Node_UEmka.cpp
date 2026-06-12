@@ -40,7 +40,9 @@ bool FUEmkaSignature::operator==(const FUEmkaSignature& Other) const
 		if (ReturnParams[i].Type != Other.ReturnParams[i].Type) return false;
 		if (ReturnParams[i].bIsArray != Other.ReturnParams[i].bIsArray) return false;
 		if (ReturnParams[i].EnumTypeName != Other.ReturnParams[i].EnumTypeName) return false;
+		if (ReturnParams[i].FriendlyName != Other.ReturnParams[i].FriendlyName) return false;
 	}
+	if (UnsupportedReason != Other.UnsupportedReason) return false;
 	return true;
 }
 
@@ -112,12 +114,156 @@ FEdGraphPinType UK2Node_UEmka::GetPinTypeFor(EUEmkaValueType ValueType)
 }
 
 // -------------------------------------------------------------------------
+// Struct declaration parser
+// -------------------------------------------------------------------------
+
+TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript)
+{
+	TArray<FUEmkaStructDef> Structs;
+	const int32 Len = InScript.Len();
+
+	// Pass 1: locate "type <Name> = struct { <body> }" declarations and capture name + body range
+	struct FRawStruct { FString Name; FString Body; };
+	TArray<FRawStruct> Raw;
+
+	int32 Pos = 0;
+	while (Pos < Len)
+	{
+		// Find "type" keyword at a word boundary
+		if (Pos + 4 < Len
+			&& InScript[Pos] == 't' && InScript[Pos + 1] == 'y' && InScript[Pos + 2] == 'p' && InScript[Pos + 3] == 'e'
+			&& FChar::IsWhitespace(InScript[Pos + 4])
+			&& (Pos == 0 || !(FChar::IsAlnum(InScript[Pos - 1]) || InScript[Pos - 1] == '_')))
+		{
+			int32 P = Pos + 4;
+			auto SkipWs = [&]() { while (P < Len && FChar::IsWhitespace(InScript[P])) ++P; };
+
+			SkipWs();
+			const int32 NameStart = P;
+			while (P < Len && (FChar::IsAlnum(InScript[P]) || InScript[P] == '_')) ++P;
+			const FString Name = InScript.Mid(NameStart, P - NameStart);
+
+			SkipWs();
+			// Optional export marker on the type itself (type Vec2* = struct { ... })
+			if (P < Len && InScript[P] == '*')
+			{
+				++P;
+				SkipWs();
+			}
+			if (!Name.IsEmpty() && P < Len && InScript[P] == '=')
+			{
+				++P;
+				SkipWs();
+				// Require "struct" keyword followed by '{'
+				if (P + 6 <= Len && InScript.Mid(P, 6) == TEXT("struct"))
+				{
+					P += 6;
+					SkipWs();
+					if (P < Len && InScript[P] == '{')
+					{
+						++P;
+						const int32 BodyStart = P;
+						int32 Depth = 1;
+						while (P < Len && Depth > 0)
+						{
+							if (InScript[P] == '{') ++Depth;
+							else if (InScript[P] == '}') --Depth;
+							if (Depth > 0) ++P;
+						}
+						if (Depth == 0)
+						{
+							Raw.Add({Name, InScript.Mid(BodyStart, P - BodyStart)});
+							Pos = P;
+						}
+					}
+				}
+			}
+		}
+		++Pos;
+	}
+
+	// Pass 2: parse fields, with the full struct name set known (catches nested struct references)
+	for (const FRawStruct& R : Raw)
+	{
+		FUEmkaStructDef Def;
+		Def.Name = R.Name;
+
+		TArray<FString> Chunks;
+		R.Body.Replace(TEXT(";"), TEXT("\n")).ParseIntoArray(Chunks, TEXT("\n"), true);
+		for (FString Chunk : Chunks)
+		{
+			// Strip line comments
+			int32 CommentIdx;
+			if (Chunk.FindChar(TEXT('/'), CommentIdx) && Chunk.Mid(CommentIdx, 2) == TEXT("//"))
+			{
+				Chunk.LeftInline(CommentIdx);
+			}
+			Chunk.TrimStartAndEndInline();
+			if (Chunk.IsEmpty())
+			{
+				continue;
+			}
+
+			int32 ColonIdx;
+			if (!Chunk.FindChar(TEXT(':'), ColonIdx))
+			{
+				// Not a "names: type" field (e.g. stray token) - can't flatten this struct
+				Def.bPinSafe = false;
+				continue;
+			}
+
+			const FString TypeText = Chunk.Mid(ColonIdx + 1).TrimStartAndEnd();
+
+			// Only plain primitive/str/enum field types can cross the pin boundary
+			const bool bComplexType = TypeText.IsEmpty()
+				|| TypeText.Contains(TEXT("["))
+				|| TypeText.Contains(TEXT("^"))
+				|| TypeText.Contains(TEXT("{"))
+				|| TypeText.StartsWith(TEXT("map"))
+				|| TypeText.StartsWith(TEXT("fn"))
+				|| TypeText.StartsWith(TEXT("weak"))
+				|| TypeText.StartsWith(TEXT("interface"))
+				|| Raw.ContainsByPredicate([&TypeText](const FRawStruct& S) { return S.Name == TypeText; });
+			if (bComplexType)
+			{
+				Def.bPinSafe = false;
+			}
+
+			TArray<FString> Names;
+			Chunk.Left(ColonIdx).ParseIntoArray(Names, TEXT(","), true);
+			for (FString FieldName : Names)
+			{
+				FieldName.TrimStartAndEndInline();
+				if (!FieldName.IsEmpty())
+				{
+					Def.Fields.Add({FieldName, TypeText});
+				}
+			}
+		}
+
+		if (Def.Fields.IsEmpty())
+		{
+			Def.bPinSafe = false;
+		}
+		Structs.Add(MoveTemp(Def));
+	}
+
+	return Structs;
+}
+
+// -------------------------------------------------------------------------
 // Signature parser
 // -------------------------------------------------------------------------
 
 FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 {
 	FUEmkaSignature Sig;
+
+	const TArray<FUEmkaStructDef> Structs = ParseStructDefs(InScript);
+	auto FindStruct = [&Structs](const FString& TypeName) -> const FUEmkaStructDef*
+	{
+		return Structs.FindByPredicate([&TypeName](const FUEmkaStructDef& S) { return S.Name == TypeName; });
+	};
 
 	// Find first exported function: fn <name>*(...)
 	int32 Pos = 0;
@@ -192,25 +338,69 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 		TArray<FString> NameGroup;
 		FString Token;
 
-		auto FlushGroup = [&](const FString& TypeName, bool bIsArray)
+		auto FlushGroup = [&](const FString& TypeName, bool bIsArray, const FString& ArrayPrefix)
 		{
 			const FString TrimmedTypeName = TypeName.TrimStartAndEnd();
 			const EUEmkaValueType VType = ParseUmkaType(TrimmedTypeName);
+			const FUEmkaStructDef* StructDef = (VType == EUEmkaValueType::Enum) ? FindStruct(TrimmedTypeName) : nullptr;
+
 			for (const FString& PName : NameGroup)
 			{
 				FString TrimmedName = PName.TrimStartAndEnd();
-				if (!TrimmedName.IsEmpty())
+				if (TrimmedName.IsEmpty())
 				{
-					FUEmkaPinDef Def;
-					Def.Name = TrimmedName;
-					Def.Type = VType;
-					Def.bIsArray = bIsArray;
-					if (VType == EUEmkaValueType::Enum)
-					{
-						Def.EnumTypeName = TrimmedTypeName;
-					}
-					Sig.Params.Add(Def);
+					continue;
 				}
+
+				if (StructDef)
+				{
+					if (bIsArray)
+					{
+						Sig.UnsupportedReason = FString::Printf(TEXT("struct arrays ([]%s) cannot be passed as pins"), *TrimmedTypeName);
+						continue;
+					}
+					if (!StructDef->bPinSafe)
+					{
+						Sig.UnsupportedReason = FString::Printf(TEXT("struct '%s' has fields that cannot be passed as pins (arrays, maps, nested structs, pointers)"), *TrimmedTypeName);
+						continue;
+					}
+
+					// Flatten: one pin per field, named <param>_<field>, displayed as <param>.<field>
+					FUEmkaShimParam& Shim = Sig.ShimParams.AddDefaulted_GetRef();
+					Shim.Name = TrimmedName;
+					Shim.StructName = StructDef->Name;
+					Shim.Fields = StructDef->Fields;
+					Sig.bNeedsShim = true;
+
+					for (const FUEmkaStructField& Field : StructDef->Fields)
+					{
+						FUEmkaPinDef Def;
+						Def.Name = FString::Printf(TEXT("%s_%s"), *TrimmedName, *Field.Name);
+						Def.Type = ParseUmkaType(Field.TypeText);
+						Def.FriendlyName = FString::Printf(TEXT("%s.%s"), *TrimmedName, *Field.Name);
+						if (Def.Type == EUEmkaValueType::Enum)
+						{
+							Def.EnumTypeName = Field.TypeText;
+							Def.FriendlyName += FString::Printf(TEXT(" (%s)"), *Field.TypeText);
+						}
+						Sig.Params.Add(Def);
+					}
+					continue;
+				}
+
+				FUEmkaShimParam& Shim = Sig.ShimParams.AddDefaulted_GetRef();
+				Shim.Name = TrimmedName;
+				Shim.TypeText = ArrayPrefix + TrimmedTypeName;
+
+				FUEmkaPinDef Def;
+				Def.Name = TrimmedName;
+				Def.Type = VType;
+				Def.bIsArray = bIsArray;
+				if (VType == EUEmkaValueType::Enum)
+				{
+					Def.EnumTypeName = TrimmedTypeName;
+				}
+				Sig.Params.Add(Def);
 			}
 			NameGroup.Empty();
 		};
@@ -242,12 +432,15 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 
 				// Detect dynamic array prefix []  (static [N] also consumed, treated as dynamic)
 				bool bIsArray = false;
+				FString ArrayPrefix;
 				if (i < ParamStr.Len() && ParamStr[i] == '[')
 				{
 					bIsArray = true;
+					const int32 PrefixStart = i;
 					++i;
 					while (i < ParamStr.Len() && ParamStr[i] != ']') ++i;
 					if (i < ParamStr.Len()) ++i; // skip ']'
+					ArrayPrefix = ParamStr.Mid(PrefixStart, i - PrefixStart);
 					while (i < ParamStr.Len() && FChar::IsWhitespace(ParamStr[i])) ++i;
 				}
 
@@ -258,7 +451,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 					TypeName += ParamStr[i];
 					++i;
 				}
-				FlushGroup(TypeName, bIsArray);
+				FlushGroup(TypeName, bIsArray, ArrayPrefix);
 				--i; // outer loop will increment past the comma
 			}
 			else
@@ -272,6 +465,19 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 		{
 			NameGroup.Add(Leftover);
 		}
+	}
+
+	// Capture raw return type text (between ')' and the body '{') for shim forwarding
+	{
+		int32 BodyBrace = Pos;
+		while (BodyBrace < Len && InScript[BodyBrace] != '{') ++BodyBrace;
+		FString RetText = InScript.Mid(Pos, BodyBrace - Pos).TrimStartAndEnd();
+		if (RetText.StartsWith(TEXT(":")))
+		{
+			RetText.RightChopInline(1);
+			RetText.TrimStartAndEndInline();
+		}
+		Sig.ReturnTypeText = RetText;
 	}
 
 	// Parse return type after ')'
@@ -303,6 +509,10 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				const FString TypeName = ReadIdent();
 				if (!TypeName.IsEmpty() && TypeName != TEXT("void"))
 				{
+					if (FindStruct(TypeName))
+					{
+						Sig.UnsupportedReason = FString::Printf(TEXT("struct '%s' inside a multi-return tuple cannot be passed as pins"), *TypeName);
+					}
 					FUEmkaPinDef Def;
 					Def.Name = FString::Printf(TEXT("item%d"), RetIdx++);
 					Def.Type = ParseUmkaType(TypeName);
@@ -317,13 +527,6 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				if (Pos < Len && InScript[Pos] == ',') ++Pos;
 			}
 			if (Pos < Len && InScript[Pos] == ')') ++Pos;
-
-			// Single-element list is just a single return - unwrap it (same as Umka)
-			if (Sig.ReturnParams.Num() == 1)
-			{
-				Sig.ReturnType = Sig.ReturnParams[0].Type;
-				Sig.ReturnParams.Empty();
-			}
 		}
 		else
 		{
@@ -340,18 +543,151 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 			const FString RetTypeName = ReadIdent();
 			if (!RetTypeName.IsEmpty() && RetTypeName != TEXT("void"))
 			{
-				Sig.ReturnType = ParseUmkaType(RetTypeName);
-				if (Sig.ReturnType.GetValue() == EUEmkaValueType::Enum)
+				const FUEmkaStructDef* StructDef = FindStruct(RetTypeName);
+				if (StructDef && Sig.bReturnIsArray)
 				{
-					Sig.ReturnEnumTypeName = RetTypeName;
+					Sig.UnsupportedReason = FString::Printf(TEXT("struct arrays ([]%s) cannot be returned as pins"), *RetTypeName);
+				}
+				else if (StructDef && !StructDef->bPinSafe)
+				{
+					Sig.UnsupportedReason = FString::Printf(TEXT("struct '%s' has fields that cannot be passed as pins (arrays, maps, nested structs, pointers)"), *RetTypeName);
+				}
+				else if (StructDef)
+				{
+					// Flatten the struct return: one output pin per field, displayed by field name
+					Sig.ReturnStructName = StructDef->Name;
+					Sig.ReturnFields = StructDef->Fields;
+					Sig.bNeedsShim = true;
+
+					for (const FUEmkaStructField& Field : StructDef->Fields)
+					{
+						FUEmkaPinDef Def;
+						Def.Name = Field.Name;
+						Def.Type = ParseUmkaType(Field.TypeText);
+						Def.FriendlyName = Field.Name;
+						if (Def.Type == EUEmkaValueType::Enum)
+						{
+							Def.EnumTypeName = Field.TypeText;
+							Def.FriendlyName += FString::Printf(TEXT(" (%s)"), *Field.TypeText);
+						}
+						Sig.ReturnParams.Add(Def);
+					}
+				}
+				else
+				{
+					Sig.ReturnType = ParseUmkaType(RetTypeName);
+					if (Sig.ReturnType.GetValue() == EUEmkaValueType::Enum)
+					{
+						Sig.ReturnEnumTypeName = RetTypeName;
+					}
 				}
 			}
+		}
+
+		// Single-element tuple or single-field struct is just a single return - unwrap it
+		if (Sig.ReturnParams.Num() == 1)
+		{
+			Sig.ReturnType = Sig.ReturnParams[0].Type;
+			Sig.bReturnIsArray = Sig.ReturnParams[0].bIsArray;
+			Sig.ReturnEnumTypeName = Sig.ReturnParams[0].EnumTypeName;
+			Sig.ReturnParams.Empty();
 		}
 	}
 
 	Sig.FunctionName = FuncName;
 	Sig.bValid = true;
+
+	// Unsupported constructs: keep the signature valid (function exists) but expose no data
+	// pins - ValidateNodeDuringCompilation reports UnsupportedReason as a compile error.
+	if (!Sig.UnsupportedReason.IsEmpty())
+	{
+		Sig.Params.Empty();
+		Sig.ReturnParams.Empty();
+		Sig.ReturnType.Reset();
+		Sig.bReturnIsArray = false;
+		Sig.ReturnEnumTypeName.Empty();
+		Sig.ShimParams.Empty();
+		Sig.ReturnStructName.Empty();
+		Sig.ReturnFields.Empty();
+		Sig.bNeedsShim = false;
+	}
+
 	return Sig;
+}
+
+// -------------------------------------------------------------------------
+// Shim codegen - wraps struct-using functions in a flat-signature caller
+// -------------------------------------------------------------------------
+
+FString UK2Node_UEmka::BuildShimFunction(const FUEmkaSignature& Sig)
+{
+	// Shim parameters: structs flattened to <param>_<field>, everything else passed through
+	TArray<FString> ParamDecls;
+	TArray<FString> CallArgs;
+	for (const FUEmkaShimParam& Param : Sig.ShimParams)
+	{
+		if (Param.StructName.IsEmpty())
+		{
+			ParamDecls.Add(FString::Printf(TEXT("%s: %s"), *Param.Name, *Param.TypeText));
+			CallArgs.Add(Param.Name);
+		}
+		else
+		{
+			TArray<FString> FieldInits;
+			for (const FUEmkaStructField& Field : Param.Fields)
+			{
+				ParamDecls.Add(FString::Printf(TEXT("%s_%s: %s"), *Param.Name, *Field.Name, *Field.TypeText));
+				FieldInits.Add(FString::Printf(TEXT("%s: %s_%s"), *Field.Name, *Param.Name, *Field.Name));
+			}
+			CallArgs.Add(FString::Printf(TEXT("%s{%s}"), *Param.StructName, *FString::Join(FieldInits, TEXT(", "))));
+		}
+	}
+
+	const FString Call = FString::Printf(TEXT("%s(%s)"), *Sig.FunctionName, *FString::Join(CallArgs, TEXT(", ")));
+
+	FString RetDecl;
+	FString Body;
+	if (!Sig.ReturnStructName.IsEmpty())
+	{
+		// Struct return: call into a local, then return its fields as a tuple
+		TArray<FString> RetTypes;
+		TArray<FString> RetFields;
+		for (const FUEmkaStructField& Field : Sig.ReturnFields)
+		{
+			RetTypes.Add(Field.TypeText);
+			RetFields.Add(FString::Printf(TEXT("__r.%s"), *Field.Name));
+		}
+		RetDecl = (RetTypes.Num() == 1)
+			? FString::Printf(TEXT(": %s"), *RetTypes[0])
+			: FString::Printf(TEXT(": (%s)"), *FString::Join(RetTypes, TEXT(", ")));
+		Body = FString::Printf(TEXT("    __r := %s\n    return %s"), *Call, *FString::Join(RetFields, TEXT(", ")));
+	}
+	else if (!Sig.ReturnTypeText.IsEmpty())
+	{
+		// Non-struct return (scalar, array, or tuple): forward it verbatim
+		RetDecl = FString::Printf(TEXT(": %s"), *Sig.ReturnTypeText);
+		Body = FString::Printf(TEXT("    return %s"), *Call);
+	}
+	else
+	{
+		Body = FString::Printf(TEXT("    %s"), *Call);
+	}
+
+	return FString::Printf(TEXT("fn __uemka_call*(%s)%s {\n%s\n}"), *FString::Join(ParamDecls, TEXT(", ")), *RetDecl, *Body);
+}
+
+FString UK2Node_UEmka::GetEffectiveScript(const FString& InScript, const FUEmkaSignature& Sig)
+{
+	if (!Sig.bValid || !Sig.bNeedsShim)
+	{
+		return InScript;
+	}
+	return InScript + TEXT("\n\n") + BuildShimFunction(Sig);
+}
+
+FString UK2Node_UEmka::GetEffectiveFunctionName(const FUEmkaSignature& Sig)
+{
+	return Sig.bNeedsShim ? TEXT("__uemka_call") : Sig.FunctionName;
 }
 
 // -------------------------------------------------------------------------
@@ -362,14 +698,14 @@ void UK2Node_UEmka::PostLoad()
 {
 	Super::PostLoad();
 	ParsedSignature = ParseScript(Script);
-	UUEmkaFunctionLibrary::CompileCheckScript(Script, LastErrorMessage, LastErrorLine);
+	UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, ParsedSignature), LastErrorMessage, LastErrorLine);
 }
 
 void UK2Node_UEmka::PostEditUndo()
 {
 	// Script has been restored by the transaction system - re-derive everything that isn't a UPROPERTY.
 	ParsedSignature = ParseScript(Script);
-	if (UUEmkaFunctionLibrary::CompileCheckScript(Script, LastErrorMessage, LastErrorLine))
+	if (UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, ParsedSignature), LastErrorMessage, LastErrorLine))
 	{
 		LastErrorLine = -1;
 		LastErrorMessage.Empty();
@@ -400,7 +736,11 @@ void UK2Node_UEmka::AllocateDefaultPins()
 		}
 		UEdGraphPin* NewPin = CreatePin(EGPD_Input, PinType.PinCategory, FName(*Param.Name));
 		NewPin->PinType = PinType;
-		if (Param.Type == EUEmkaValueType::Enum && !Param.EnumTypeName.IsEmpty())
+		if (!Param.FriendlyName.IsEmpty())
+		{
+			NewPin->PinFriendlyName = FText::FromString(Param.FriendlyName);
+		}
+		else if (Param.Type == EUEmkaValueType::Enum && !Param.EnumTypeName.IsEmpty())
 		{
 			NewPin->PinFriendlyName = FText::FromString(FString::Printf(TEXT("%s (%s)"), *Param.Name, *Param.EnumTypeName));
 		}
@@ -421,7 +761,11 @@ void UK2Node_UEmka::AllocateDefaultPins()
 			FName PinName = *FString::Printf(TEXT("ReturnValue%d"), i + 1);
 			UEdGraphPin* RetPin = CreatePin(EGPD_Output, PinType.PinCategory, PinName);
 			RetPin->PinType = PinType;
-			if (Def.Type == EUEmkaValueType::Enum && !Def.EnumTypeName.IsEmpty())
+			if (!Def.FriendlyName.IsEmpty())
+			{
+				RetPin->PinFriendlyName = FText::FromString(Def.FriendlyName);
+			}
+			else if (Def.Type == EUEmkaValueType::Enum && !Def.EnumTypeName.IsEmpty())
 			{
 				RetPin->PinFriendlyName = FText::FromString(FString::Printf(TEXT("ReturnValue%d (%s)"), i + 1, *Def.EnumTypeName));
 			}
@@ -511,10 +855,16 @@ void UK2Node_UEmka::ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLo
 		return;
 	}
 
-	// Run a full Umka compile to catch type errors, undefined symbols, etc.
+	if (!ParsedSignature.UnsupportedReason.IsEmpty())
+	{
+		MessageLog.Error(*FText::Format(LOCTEXT("UnsupportedSignature", "UEmka node: {0} @@"), FText::FromString(ParsedSignature.UnsupportedReason)).ToString(), this);
+		return;
+	}
+
+	// Run a full Umka compile (including any generated shim) to catch type errors, undefined symbols, etc.
 	FString CompileError;
 	int32 ErrorLine = -1;
-	if (!UUEmkaFunctionLibrary::CompileCheckScript(Script, CompileError, ErrorLine))
+	if (!UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, ParsedSignature), CompileError, ErrorLine))
 	{
 		LastErrorLine = ErrorLine;
 		LastErrorMessage = CompileError;
@@ -532,8 +882,9 @@ void UK2Node_UEmka::OnScriptChanged(const FString& NewScript)
 	Script = NewScript;
 	const FUEmkaSignature NewSig = ParseScript(Script);
 
-	// Live compile check - drives squiggly line highlighting in SGraphNode_UEmka
-	if (UUEmkaFunctionLibrary::CompileCheckScript(Script, LastErrorMessage, LastErrorLine))
+	// Live compile check - drives squiggly line highlighting in SGraphNode_UEmka.
+	// Checks the effective script so generated shim errors surface immediately.
+	if (UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, NewSig), LastErrorMessage, LastErrorLine))
 	{
 		LastErrorLine = -1;
 		LastErrorMessage.Empty();
@@ -612,6 +963,13 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 		return;
 	}
 
+	if (!ParsedSignature.UnsupportedReason.IsEmpty())
+	{
+		CompilerContext.MessageLog.Error(*FText::Format(LOCTEXT("ExpandUnsupportedSig", "UEmka node: {0} @@"), FText::FromString(ParsedSignature.UnsupportedReason)).ToString(), this);
+		BreakAllNodeLinks();
+		return;
+	}
+
 	const bool bMultiReturn = ParsedSignature.ReturnParams.Num() >= 2;
 
 	// --- Spawn runner call ---
@@ -632,11 +990,11 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 	// Wire exec out -> Then
 	CompilerContext.MovePinLinksToIntermediate(*FindPinChecked(UEdGraphSchema_K2::PN_Then, EGPD_Output), *CallNode->GetThenPin());
 
-	// Set Script literal
-	CallNode->FindPinChecked(TEXT("Script"))->DefaultValue = Script;
+	// Set Script literal - includes the generated __uemka_call shim for struct signatures
+	CallNode->FindPinChecked(TEXT("Script"))->DefaultValue = GetEffectiveScript(Script, ParsedSignature);
 
 	// Set FunctionName literal
-	CallNode->FindPinChecked(TEXT("FunctionName"))->DefaultValue = ParsedSignature.FunctionName;
+	CallNode->FindPinChecked(TEXT("FunctionName"))->DefaultValue = GetEffectiveFunctionName(ParsedSignature);
 
 	if (bMultiReturn)
 	{

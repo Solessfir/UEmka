@@ -81,7 +81,7 @@ class UEMKA_API UUEmkaFunctionLibrary : public UBlueprintFunctionLibrary
 public:
 	// Used by UK2Node_UEmka ExpandNode only. Executes a script inline with ordered typed parameters.
 	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
-	static bool RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, EUEmkaValueType ResultType, bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error);
+	static bool RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error);
 
 	// Used by UK2Node_UEmka ExpandNode only for multi-return functions (fn foo*(): (int, str)).
 	// ResultTypes is a comma-separated list of EUEmkaValueType integer values (e.g. "0,12" for int, str).
@@ -100,16 +100,16 @@ public:
 
 	// Covers: int, int8, int16, int32, uint8, uint16, uint32, uint, char
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeIntParam(EUEmkaValueType Type, int64 Value);
+	static FUEmkaScriptParam MakeIntParam(const EUEmkaValueType Type, const int64 Value);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeBoolParam(bool Value);
+	static FUEmkaScriptParam MakeBoolParam(const bool Value);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeRealParam(double Value);
+	static FUEmkaScriptParam MakeRealParam(const double Value);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeReal32Param(float Value);
+	static FUEmkaScriptParam MakeReal32Param(const float Value);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeStrParam(const FString& Value);
@@ -138,15 +138,15 @@ public:
 
 	// []int8, []int16, []int32, []uint16, []uint32, []bool - BP pin is TArray<int> (int32)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeIntArrayParam(EUEmkaValueType Type, const TArray<int32>& Values);
+	static FUEmkaScriptParam MakeIntArrayParam(const EUEmkaValueType Type, const TArray<int32>& Values);
 
 	// []uint8, []char, []MyEnum - BP pin is TArray<uint8> (Byte), matching the node's Array of Byte pin
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeByteArrayParam(EUEmkaValueType Type, const TArray<uint8>& Values);
+	static FUEmkaScriptParam MakeByteArrayParam(const EUEmkaValueType Type, const TArray<uint8>& Values);
 
 	// []uint - BP pin is TArray<int64>
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeInt64ArrayParam(EUEmkaValueType Type, const TArray<int64>& Values);
+	static FUEmkaScriptParam MakeInt64ArrayParam(const EUEmkaValueType Type, const TArray<int64>& Values);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeRealArrayParam(const TArray<double>& Values);
