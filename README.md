@@ -206,6 +206,8 @@ fn foo*(x: int): int {
 LogUEmka: [foo] input: 42
 ```
 
+Captured output is limited to 64 KB per execution - anything beyond that is dropped and a truncation warning is logged.
+
 
 ## Error Handling
 
