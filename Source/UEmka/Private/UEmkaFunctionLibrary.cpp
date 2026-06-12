@@ -79,6 +79,63 @@ static int64 LoadIntElem(const void* Data, const int32 Index, const EUEmkaValueT
 	}
 }
 
+// Copies a finished Umka dynarray into the matching array field of a script param.
+static void ReadDynArrayResult(const FUmkaDynArrayHeader& Header, const EUEmkaValueType Type, FUEmkaScriptParam& Out)
+{
+	const int32 Len = umkaGetDynArrayLen(&Header);
+	switch (Type)
+	{
+		case EUEmkaValueType::Real:
+		{
+			Out.RealArrayValue.SetNum(Len);
+			if (Len > 0)
+			{
+				FMemory::Memcpy(Out.RealArrayValue.GetData(), Header.data, Len * sizeof(double));
+			}
+			break;
+		}
+		case EUEmkaValueType::Real32:
+		{
+			Out.Real32ArrayValue.SetNum(Len);
+			if (Len > 0)
+			{
+				FMemory::Memcpy(Out.Real32ArrayValue.GetData(), Header.data, Len * sizeof(float));
+			}
+			break;
+		}
+		case EUEmkaValueType::Str:
+		{
+			char** DataPtr = static_cast<char**>(Header.data);
+			Out.StringArrayValue.SetNum(Len);
+			for (int32 j = 0; j < Len; ++j)
+			{
+				Out.StringArrayValue[j] = DataPtr[j] ? UTF8_TO_TCHAR(DataPtr[j]) : TEXT("");
+			}
+			break;
+		}
+		default: // all int-like types
+		{
+			Out.IntArrayValue.SetNum(Len);
+			for (int32 j = 0; j < Len; ++j)
+			{
+				Out.IntArrayValue[j] = LoadIntElem(Header.data, j, Type, Header.itemSize);
+			}
+			break;
+		}
+	}
+}
+
+// Formats the current Umka error as "file:line: msg", or returns Fallback when unavailable.
+static FString FormatUmkaError(Umka* VM, const TCHAR* Fallback)
+{
+	const UmkaError* Err = umkaGetError(VM);
+	if (Err && Err->msg)
+	{
+		return FString::Format(TEXT("{0}:{1}: {2}"), {Err->fileName, Err->line, Err->msg});
+	}
+	return Fallback;
+}
+
 // ResultTypes string (RunUmkaInlineMulti) encodes EUEmkaValueType by ordinal value.
 // These asserts guard against silent breakage if the enum is reordered.
 static_assert(static_cast<int32>(EUEmkaValueType::Int)  == 0,  "EUEmkaValueType ordinal changed - update ResultTypes serialization");
@@ -259,60 +316,89 @@ struct FUmkaStdoutCapture
 };
 #endif
 
+// Owns an Umka VM for one inline execution: allocates, compiles the script, and resolves the target function.
+// Frees the VM on destruction. Check IsValid() / Error after construction.
+struct FUmkaScopedVM
+{
+	Umka* VM = nullptr;
+	UmkaFuncContext Context = {};
+	FString Error;
+
+	FUmkaScopedVM(const FString& Script, const FString& FunctionName)
+	{
+		if (FunctionName.IsEmpty())
+		{
+			Error = TEXT("No function name provided");
+			return;
+		}
+
+		if (Script.IsEmpty())
+		{
+			Error = TEXT("No script provided");
+			return;
+		}
+
+		VM = umkaAlloc();
+		if (!VM)
+		{
+			Error = TEXT("Umka: failed to allocate VM");
+			return;
+		}
+
+		if (!umkaInit(VM, "script.um", TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
+		{
+			Error = TEXT("Umka failed to initialize");
+			return;
+		}
+
+		if (!umkaCompile(VM))
+		{
+			Error = FormatUmkaError(VM, TEXT("Umka compile error"));
+			return;
+		}
+
+		if (!umkaGetFunc(VM, nullptr, TCHAR_TO_UTF8(*FunctionName), &Context))
+		{
+			Error = FString::Format(TEXT("Function '{0}' not found"), {FunctionName});
+		}
+	}
+
+	~FUmkaScopedVM()
+	{
+		if (VM)
+		{
+			umkaFree(VM);
+		}
+	}
+
+	FUmkaScopedVM(const FUmkaScopedVM&) = delete;
+	FUmkaScopedVM& operator=(const FUmkaScopedVM&) = delete;
+
+	bool IsValid() const
+	{
+		return VM && Error.IsEmpty();
+	}
+};
+
 bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error)
 {
-	if (FunctionName.IsEmpty())
+	FUmkaScopedVM Vm(Script, FunctionName);
+	if (!Vm.IsValid())
 	{
-		Error = "No function name provided";
-		return false;
-	}
-
-	if (Script.IsEmpty())
-	{
-		Error = "No script provided";
-		return false;
-	}
-
-	Umka* umka = umkaAlloc();
-	if (!umka)
-	{
-		Error = TEXT("Umka: failed to allocate VM");
-		return false;
-	}
-
-	if (!umkaInit(umka, "script.um", TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
-	{
-		Error = "Umka failed to initialize";
-		umkaFree(umka);
-		return false;
-	}
-
-	if (!umkaCompile(umka))
-	{
-		const UmkaError* UmkaErr = umkaGetError(umka);
-		Error = FString::Format(TEXT("{0}:{1}: {2}"), {UmkaErr->fileName, UmkaErr->line, UmkaErr->msg});
-		umkaFree(umka);
-		return false;
-	}
-
-	UmkaFuncContext Context;
-	if (!umkaGetFunc(umka, nullptr, TCHAR_TO_UTF8(*FunctionName), &Context))
-	{
-		Error = FString::Format(TEXT("Function '{0}' not found"), {FunctionName});
-		umkaFree(umka);
+		Error = Vm.Error;
 		return false;
 	}
 
 	// Push parameters - ArrayHeaders must outlive umkaCall() (Umka holds raw pointers)
 	TArray<FUmkaDynArrayHeader> ArrayHeaders;
-	PushUmkaParams(umka, Context, Params, ArrayHeaders);
+	PushUmkaParams(Vm.VM, Vm.Context, Params, ArrayHeaders);
 
 	// For structured (array) returns, Umka expects result->ptrVal to point to pre-allocated storage
 	// before the call - it passes this as a hidden out-parameter internally
 	FUmkaDynArrayHeader StructuredResult = {};
-	if (bResultIsArray && Context.result)
+	if (bResultIsArray && Vm.Context.result)
 	{
-		Context.result->ptrVal = &StructuredResult;
+		Vm.Context.result->ptrVal = &StructuredResult;
 	}
 
 	// Redirect CRT stdout around umkaCall so printf() output lands in UE_LOG.
@@ -321,13 +407,13 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 	FUmkaStdoutCapture StdoutCapture;
 	#endif
 
-	const bool bSuccess = umkaCall(umka, &Context) == 0;
+	const bool bSuccess = umkaCall(Vm.VM, &Vm.Context) == 0;
 
 	#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
 	StdoutCapture.FlushToLog(FunctionName);
 	#endif
 
-	if (bSuccess && ResultType != EUEmkaValueType::Void && Context.result)
+	if (bSuccess && ResultType != EUEmkaValueType::Void && Vm.Context.result)
 	{
 		Result.Type = ResultType;
 		Result.bIsArray = bResultIsArray;
@@ -337,47 +423,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 			// vmCall overwrites *fn->result with REG_RESULT after the call, so Context.result->ptrVal
 			// is no longer reliable for structured returns. Read StructuredResult directly - Umka
 			// fills it via the hidden out-parameter before vmCall returns.
-			const int32 Len = umkaGetDynArrayLen(&StructuredResult);
-			switch (ResultType)
-			{
-				case EUEmkaValueType::Real:
-				{
-					Result.RealArrayValue.SetNum(Len);
-					if (Len > 0)
-					{
-						FMemory::Memcpy(Result.RealArrayValue.GetData(), StructuredResult.data, Len * sizeof(double));
-					}
-					break;
-				}
-				case EUEmkaValueType::Real32:
-				{
-					Result.Real32ArrayValue.SetNum(Len);
-					if (Len > 0)
-					{
-						FMemory::Memcpy(Result.Real32ArrayValue.GetData(), StructuredResult.data, Len * sizeof(float));
-					}
-					break;
-				}
-				case EUEmkaValueType::Str:
-				{
-					char** DataPtr = static_cast<char**>(StructuredResult.data);
-					Result.StringArrayValue.SetNum(Len);
-					for (int32 j = 0; j < Len; ++j)
-					{
-						Result.StringArrayValue[j] = DataPtr[j] ? UTF8_TO_TCHAR(DataPtr[j]) : TEXT("");
-					}
-					break;
-				}
-				default: // all int-like types
-				{
-					Result.IntArrayValue.SetNum(Len);
-					for (int32 j = 0; j < Len; ++j)
-					{
-						Result.IntArrayValue[j] = LoadIntElem(StructuredResult.data, j, ResultType, StructuredResult.itemSize);
-					}
-					break;
-				}
-			}
+			ReadDynArrayResult(StructuredResult, ResultType, Result);
 		}
 		else
 		{
@@ -393,20 +439,20 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 				case EUEmkaValueType::Bool:
 				case EUEmkaValueType::Char:
 				case EUEmkaValueType::Enum:
-					Result.IntValue = Context.result->intVal;
+					Result.IntValue = Vm.Context.result->intVal;
 					break;
 				case EUEmkaValueType::UInt:
-					Result.IntValue = static_cast<int64>(Context.result->uintVal);
+					Result.IntValue = static_cast<int64>(Vm.Context.result->uintVal);
 					break;
 				// real32 results use realVal - real32Val is not used in result slots
 				case EUEmkaValueType::Real:
 				case EUEmkaValueType::Real32:
-					Result.RealValue = Context.result->realVal;
+					Result.RealValue = Vm.Context.result->realVal;
 					break;
 				case EUEmkaValueType::Str:
-					if (Context.result->ptrVal)
+					if (Vm.Context.result->ptrVal)
 					{
-						Result.StringValue = UTF8_TO_TCHAR(static_cast<const char*>(Context.result->ptrVal));
+						Result.StringValue = UTF8_TO_TCHAR(static_cast<const char*>(Vm.Context.result->ptrVal));
 					}
 					break;
 				default:
@@ -416,19 +462,10 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 	}
 	else if (!bSuccess)
 	{
-		const UmkaError* UmkaErr = umkaGetError(umka);
-		if (UmkaErr && UmkaErr->msg)
-		{
-			Error = FString::Format(TEXT("{0}:{1}: {2}"), {UmkaErr->fileName, UmkaErr->line, UmkaErr->msg});
-		}
-		else
-		{
-			Error = TEXT("Umka runtime error");
-		}
+		Error = FormatUmkaError(Vm.VM, TEXT("Umka runtime error"));
 		UE_LOG(LogUEmka, Error, TEXT("[%s] %s: %s"), *GetPathNameSafe(Caller), *FunctionName, *Error);
 	}
 
-	umkaFree(umka);
 	return bSuccess;
 }
 
@@ -498,18 +535,6 @@ static void ComputeFieldOffsets(const TArray<EUEmkaValueType>& Types, const TArr
 
 bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error)
 {
-	if (FunctionName.IsEmpty())
-	{
-		Error = "No function name provided";
-		return false;
-	}
-
-	if (Script.IsEmpty())
-	{
-		Error = "No script provided";
-		return false;
-	}
-
 	// Parse "type:isArray" pairs (e.g. "0:0,12:0" = int,str  or  "0:1,12:0" = []int,str)
 	TArray<EUEmkaValueType> RetTypes;
 	TArray<bool> bRetIsArray;
@@ -531,39 +556,16 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 		return false;
 	}
 
-	Umka* umka = umkaAlloc();
-	if (!umka)
+	FUmkaScopedVM Vm(Script, FunctionName);
+	if (!Vm.IsValid())
 	{
-		Error = TEXT("Umka: failed to allocate VM");
-		return false;
-	}
-
-	if (!umkaInit(umka, "script.um", TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
-	{
-		Error = "Umka failed to initialize";
-		umkaFree(umka);
-		return false;
-	}
-
-	if (!umkaCompile(umka))
-	{
-		const UmkaError* UmkaErr = umkaGetError(umka);
-		Error = FString::Format(TEXT("{0}:{1}: {2}"), {UmkaErr->fileName, UmkaErr->line, UmkaErr->msg});
-		umkaFree(umka);
-		return false;
-	}
-
-	UmkaFuncContext Context;
-	if (!umkaGetFunc(umka, nullptr, TCHAR_TO_UTF8(*FunctionName), &Context))
-	{
-		Error = FString::Format(TEXT("Function '{0}' not found"), {FunctionName});
-		umkaFree(umka);
+		Error = Vm.Error;
 		return false;
 	}
 
 	// Push parameters - ArrayHeaders must outlive umkaCall() (Umka holds raw pointers)
 	TArray<FUmkaDynArrayHeader> ArrayHeaders;
-	PushUmkaParams(umka, Context, Params, ArrayHeaders);
+	PushUmkaParams(Vm.VM, Vm.Context, Params, ArrayHeaders);
 
 	// Pre-allocate the result struct buffer and point the hidden #result param at it.
 	// Field offsets are computed using the same layout rules as Umka (umka_types.c typeAddField).
@@ -574,9 +576,9 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 	TArray<uint8> StructBuffer;
 	StructBuffer.SetNumZeroed(FMath::Max(StructSize, 1));
 
-	if (Context.result)
+	if (Vm.Context.result)
 	{
-		Context.result->ptrVal = StructBuffer.GetData();
+		Vm.Context.result->ptrVal = StructBuffer.GetData();
 	}
 
 	// Redirect CRT stdout around umkaCall so printf() output lands in UE_LOG.
@@ -585,7 +587,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 	FUmkaStdoutCapture StdoutCapture;
 	#endif
 
-	const bool bSuccess = umkaCall(umka, &Context) == 0;
+	const bool bSuccess = umkaCall(Vm.VM, &Vm.Context) == 0;
 
 	#if PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC
 	StdoutCapture.FlushToLog(FunctionName);
@@ -607,44 +609,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 			if (bIsArr)
 			{
 				// FieldPtr points to the inline DynArray header (24 bytes) inside the result struct
-				const FUmkaDynArrayHeader* Header = reinterpret_cast<const FUmkaDynArrayHeader*>(FieldPtr);
-				const int32 Len = umkaGetDynArrayLen(FieldPtr);
-				switch (T)
-				{
-					case EUEmkaValueType::Real:
-						R.RealArrayValue.SetNum(Len);
-						if (Len > 0)
-						{
-							FMemory::Memcpy(R.RealArrayValue.GetData(), Header->data, Len * sizeof(double));
-						}
-						break;
-					case EUEmkaValueType::Real32:
-						R.Real32ArrayValue.SetNum(Len);
-						if (Len > 0)
-						{
-							FMemory::Memcpy(R.Real32ArrayValue.GetData(), Header->data, Len * sizeof(float));
-						}
-						break;
-					case EUEmkaValueType::Str:
-					{
-						char** DataPtr = static_cast<char**>(Header->data);
-						R.StringArrayValue.SetNum(Len);
-						for (int32 j = 0; j < Len; ++j)
-						{
-							R.StringArrayValue[j] = DataPtr[j] ? UTF8_TO_TCHAR(DataPtr[j]) : TEXT("");
-						}
-						break;
-					}
-					default: // all int-like types
-					{
-						R.IntArrayValue.SetNum(Len);
-						for (int32 j = 0; j < Len; ++j)
-						{
-							R.IntArrayValue[j] = LoadIntElem(Header->data, j, T, Header->itemSize);
-						}
-						break;
-					}
-				}
+				ReadDynArrayResult(*reinterpret_cast<const FUmkaDynArrayHeader*>(FieldPtr), T, R);
 			}
 			else
 			{
@@ -677,19 +642,10 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 	}
 	else
 	{
-		const UmkaError* UmkaErr = umkaGetError(umka);
-		if (UmkaErr && UmkaErr->msg)
-		{
-			Error = FString::Format(TEXT("{0}:{1}: {2}"), {UmkaErr->fileName, UmkaErr->line, UmkaErr->msg});
-		}
-		else
-		{
-			Error = TEXT("Umka runtime error");
-		}
+		Error = FormatUmkaError(Vm.VM, TEXT("Umka runtime error"));
 		UE_LOG(LogUEmka, Error, TEXT("[%s] %s: %s"), *GetPathNameSafe(Caller), *FunctionName, *Error);
 	}
 
-	umkaFree(umka);
 	return bSuccess;
 }
 

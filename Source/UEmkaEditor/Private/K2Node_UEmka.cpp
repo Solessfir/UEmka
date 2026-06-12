@@ -17,36 +17,6 @@
 static const FName PIN_ReturnValue(TEXT("ReturnValue"));
 
 // -------------------------------------------------------------------------
-// FUEmkaSignature equality
-// -------------------------------------------------------------------------
-
-bool FUEmkaSignature::operator==(const FUEmkaSignature& Other) const
-{
-	if (FunctionName != Other.FunctionName) return false;
-	if (ReturnType != Other.ReturnType) return false;
-	if (bReturnIsArray != Other.bReturnIsArray) return false;
-	if (ReturnEnumTypeName != Other.ReturnEnumTypeName) return false;
-	if (Params.Num() != Other.Params.Num()) return false;
-	for (int32 i = 0; i < Params.Num(); ++i)
-	{
-		if (Params[i].Name != Other.Params[i].Name) return false;
-		if (Params[i].Type != Other.Params[i].Type) return false;
-		if (Params[i].bIsArray != Other.Params[i].bIsArray) return false;
-		if (Params[i].EnumTypeName != Other.Params[i].EnumTypeName) return false;
-	}
-	if (ReturnParams.Num() != Other.ReturnParams.Num()) return false;
-	for (int32 i = 0; i < ReturnParams.Num(); ++i)
-	{
-		if (ReturnParams[i].Type != Other.ReturnParams[i].Type) return false;
-		if (ReturnParams[i].bIsArray != Other.ReturnParams[i].bIsArray) return false;
-		if (ReturnParams[i].EnumTypeName != Other.ReturnParams[i].EnumTypeName) return false;
-		if (ReturnParams[i].FriendlyName != Other.ReturnParams[i].FriendlyName) return false;
-	}
-	if (UnsupportedReason != Other.UnsupportedReason) return false;
-	return true;
-}
-
-// -------------------------------------------------------------------------
 // Static helpers
 // -------------------------------------------------------------------------
 
@@ -927,7 +897,29 @@ void UK2Node_UEmka::OnScriptChanged(const FString& NewScript)
 // ExpandNode helpers
 // -------------------------------------------------------------------------
 
-static FName GetGetResultFuncName(EUEmkaValueType RetType, bool bIsArray)
+// Selects the Make*Param helper matching a pin's type - mirror of GetGetResultFuncName.
+static FName GetMakeParamFuncName(const EUEmkaValueType Type, const bool bIsArray)
+{
+	if (bIsArray)
+	{
+		if (Type == EUEmkaValueType::Real)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeRealArrayParam);
+		if (Type == EUEmkaValueType::Real32)							   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeReal32ArrayParam);
+		if (Type == EUEmkaValueType::Str)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrArrayParam);
+		if (Type == EUEmkaValueType::Int || Type == EUEmkaValueType::UInt) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam);
+		if (Type == EUEmkaValueType::UInt8
+		 || Type == EUEmkaValueType::Char
+		 || Type == EUEmkaValueType::Enum)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeByteArrayParam);
+		return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntArrayParam);
+	}
+
+	if (Type == EUEmkaValueType::Real)   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeRealParam);
+	if (Type == EUEmkaValueType::Real32) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeReal32Param);
+	if (Type == EUEmkaValueType::Str)    return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrParam);
+	if (Type == EUEmkaValueType::Bool)   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeBoolParam);
+	return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntParam);
+}
+
+static FName GetGetResultFuncName(const EUEmkaValueType RetType, const bool bIsArray)
 {
 	if (bIsArray)
 	{
@@ -1022,98 +1014,71 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 	// --- Build TArray<FUEmkaScriptParam> via Make*Param helpers (avoids UK2Node_MakeStruct) ---
 	// Always create the MakeArray node - even for zero params it must be wired to satisfy BP compiler
 	UK2Node_MakeArray* MakeArrayNode = CompilerContext.SpawnIntermediateNode<UK2Node_MakeArray>(this, SourceGraph);
-		MakeArrayNode->AllocateDefaultPins();
+	MakeArrayNode->AllocateDefaultPins();
 
-		if (ParsedSignature.Params.Num() == 0)
+	if (ParsedSignature.Params.Num() == 0)
+	{
+		// Remove the default [0] pin so MakeArray outputs an empty array
+		if (UEdGraphPin* DefaultPin = MakeArrayNode->FindPin(TEXT("[0]"), EGPD_Input))
 		{
-			// Remove the default [0] pin so MakeArray outputs an empty array
-			if (UEdGraphPin* DefaultPin = MakeArrayNode->FindPin(TEXT("[0]"), EGPD_Input))
+			MakeArrayNode->Pins.Remove(DefaultPin);
+		}
+	}
+	else
+	{
+		for (int32 i = 1; i < ParsedSignature.Params.Num(); ++i)
+		{
+			MakeArrayNode->AddInputPin();
+		}
+
+		// Pre-type all MakeArray element pins
+		{
+			FEdGraphPinType StructPin;
+			StructPin.PinCategory = UEdGraphSchema_K2::PC_Struct;
+			StructPin.PinSubCategoryObject = FUEmkaScriptParam::StaticStruct();
+			for (UEdGraphPin* Pin : MakeArrayNode->Pins)
 			{
-				MakeArrayNode->Pins.Remove(DefaultPin);
+				if (Pin->Direction == EGPD_Input) Pin->PinType = StructPin;
 			}
 		}
-		else
+
+		for (int32 i = 0; i < ParsedSignature.Params.Num(); ++i)
 		{
-			for (int32 i = 1; i < ParsedSignature.Params.Num(); ++i)
+			const FUEmkaPinDef& Param = ParsedSignature.Params[i];
+
+			// Choose the typed helper - array vs scalar, CallFunction avoids MakeStruct validation warnings
+			const FName MakeFuncName = GetMakeParamFuncName(Param.Type, Param.bIsArray);
+
+			UK2Node_CallFunction* MakeParamNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
+			MakeParamNode->FunctionReference.SetExternalMember(MakeFuncName, UUEmkaFunctionLibrary::StaticClass());
+			MakeParamNode->AllocateDefaultPins();
+
+			// MakeIntParam / MakeIntArrayParam / MakeInt64ArrayParam / MakeByteArrayParam take an explicit Type enum
+			if (UEdGraphPin* TypePin = MakeParamNode->FindPin(TEXT("Type")))
 			{
-				MakeArrayNode->AddInputPin();
+				TypePin->DefaultValue = UEnum::GetValueAsString(Param.Type);
 			}
 
-			// Pre-type all MakeArray element pins
+			// Connect our input pin -> helper Values/Value pin
+			if (UEdGraphPin* InputPin = FindPin(FName(*Param.Name), EGPD_Input))
 			{
-				FEdGraphPinType StructPin;
-				StructPin.PinCategory = UEdGraphSchema_K2::PC_Struct;
-				StructPin.PinSubCategoryObject = FUEmkaScriptParam::StaticStruct();
-				for (UEdGraphPin* Pin : MakeArrayNode->Pins)
+				const FName ValuePinName = Param.bIsArray ? TEXT("Values") : TEXT("Value");
+				if (UEdGraphPin* ValuePin = MakeParamNode->FindPin(ValuePinName))
 				{
-					if (Pin->Direction == EGPD_Input) Pin->PinType = StructPin;
+					CompilerContext.MovePinLinksToIntermediate(*InputPin, *ValuePin);
 				}
 			}
 
-			for (int32 i = 0; i < ParsedSignature.Params.Num(); ++i)
+			// Helper ReturnValue -> MakeArray element [i]
+			if (UEdGraphPin* ParamOutPin = MakeParamNode->FindPin(TEXT("ReturnValue"), EGPD_Output))
 			{
-				const FUEmkaPinDef& Param = ParsedSignature.Params[i];
-
-				// Choose the typed helper - array vs scalar, CallFunction avoids MakeStruct validation warnings
-				FName MakeFuncName;
-				if (Param.bIsArray)
+				if (UEdGraphPin* ArrayElemPin = MakeArrayNode->FindPin(*FString::Printf(TEXT("[%d]"), i)))
 				{
-					if      (Param.Type == EUEmkaValueType::Real)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeRealArrayParam);
-					else if (Param.Type == EUEmkaValueType::Real32) MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeReal32ArrayParam);
-					else if (Param.Type == EUEmkaValueType::Str)    MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrArrayParam);
-					else if (Param.Type == EUEmkaValueType::Int
-						  || Param.Type == EUEmkaValueType::UInt)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam);
-					else if (Param.Type == EUEmkaValueType::UInt8
-						  || Param.Type == EUEmkaValueType::Char
-						  || Param.Type == EUEmkaValueType::Enum)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeByteArrayParam);
-					else                                            MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntArrayParam);
-				}
-				else
-				{
-					if      (Param.Type == EUEmkaValueType::Real)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeRealParam);
-					else if (Param.Type == EUEmkaValueType::Real32) MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeReal32Param);
-					else if (Param.Type == EUEmkaValueType::Str)    MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrParam);
-					else if (Param.Type == EUEmkaValueType::Bool)   MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeBoolParam);
-					else                                            MakeFuncName = GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntParam);
-				}
-
-				UK2Node_CallFunction* MakeParamNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
-				MakeParamNode->FunctionReference.SetExternalMember(MakeFuncName, UUEmkaFunctionLibrary::StaticClass());
-				MakeParamNode->AllocateDefaultPins();
-
-				// MakeIntParam / MakeIntArrayParam / MakeInt64ArrayParam / MakeByteArrayParam take an explicit Type enum
-				if (MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntParam)
-					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeIntArrayParam)
-					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam)
-					|| MakeFuncName == GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeByteArrayParam))
-				{
-					if (UEdGraphPin* TypePin = MakeParamNode->FindPin(TEXT("Type")))
-					{
-						TypePin->DefaultValue = UEnum::GetValueAsString(Param.Type);
-					}
-				}
-
-				// Connect our input pin -> helper Values/Value pin
-				UEdGraphPin* InputPin = FindPin(FName(*Param.Name), EGPD_Input);
-				if (InputPin)
-				{
-					const FName ValuePinName = Param.bIsArray ? TEXT("Values") : TEXT("Value");
-					if (UEdGraphPin* ValuePin = MakeParamNode->FindPin(ValuePinName))
-					{
-						CompilerContext.MovePinLinksToIntermediate(*InputPin, *ValuePin);
-					}
-				}
-
-				// Helper ReturnValue -> MakeArray element [i]
-				if (UEdGraphPin* ParamOutPin = MakeParamNode->FindPin(TEXT("ReturnValue"), EGPD_Output))
-				{
-					if (UEdGraphPin* ArrayElemPin = MakeArrayNode->FindPin(*FString::Printf(TEXT("[%d]"), i)))
-					{
-						ParamOutPin->MakeLinkTo(ArrayElemPin);
-					}
+					ParamOutPin->MakeLinkTo(ArrayElemPin);
 				}
 			}
 		}
+	}
 
 	// Explicitly type the Array output pin before linking
 	UEdGraphPin* ArrayOutPin = MakeArrayNode->FindPin(TEXT("Array"), EGPD_Output);

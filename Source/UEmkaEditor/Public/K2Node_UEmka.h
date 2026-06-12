@@ -18,6 +18,8 @@ struct FUEmkaPinDef
 	FString EnumTypeName; // set when Type == EUEmkaValueType::Enum; stores the Umka type identifier
 
 	FString FriendlyName; // optional display override, e.g. "p.x" for flattened struct fields
+
+	bool operator==(const FUEmkaPinDef&) const = default;
 };
 
 // One field of a user-defined struct type.
@@ -26,6 +28,8 @@ struct FUEmkaStructField
 	FString Name;
 
 	FString TypeText; // Umka source text of the field type, e.g. "real", "str", "Direction"
+
+	bool operator==(const FUEmkaStructField&) const = default;
 };
 
 // A user-defined struct type parsed from the script (type Name = struct { ... }).
@@ -49,6 +53,8 @@ struct FUEmkaShimParam
 	FString StructName; // non-empty when the param is a struct (flattened into per-field pins)
 
 	TArray<FUEmkaStructField> Fields; // struct fields, in declaration order
+
+	bool operator==(const FUEmkaShimParam&) const = default;
 };
 
 // Result of parsing the first exported function from a script.
@@ -84,7 +90,7 @@ struct FUEmkaSignature
 	// struct inside multi-return, struct with unsupported field types). No data pins generated.
 	FString UnsupportedReason;
 
-	bool operator==(const FUEmkaSignature& Other) const;
+	bool operator==(const FUEmkaSignature&) const = default;
 };
 
 // Custom Blueprint node that embeds an Umka script directly.
