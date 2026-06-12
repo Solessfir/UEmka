@@ -38,6 +38,37 @@ struct FUmkaDynArrayHeader
 	void* data;
 };
 
+// Stores an int-like value into a dynarray element of the given size.
+// Sign is irrelevant for stores - two's complement truncation preserves the low bytes.
+static void StoreIntElem(void* Data, const int32 Index, const int64 ItemSize, const int64 Value)
+{
+	switch (ItemSize)
+	{
+		case 1: static_cast<uint8*>(Data)[Index]  = static_cast<uint8>(Value);  break;
+		case 2: static_cast<uint16*>(Data)[Index] = static_cast<uint16>(Value); break;
+		case 4: static_cast<uint32*>(Data)[Index] = static_cast<uint32>(Value); break;
+		default: static_cast<int64*>(Data)[Index] = Value;                      break;
+	}
+}
+
+// Loads a dynarray element as int64, using the declared type for width and sign extension.
+static int64 LoadIntElem(const void* Data, const int32 Index, const EUEmkaValueType Type)
+{
+	switch (Type)
+	{
+		case EUEmkaValueType::Int8:   return static_cast<const int8*>(Data)[Index];
+		case EUEmkaValueType::Int16:  return static_cast<const int16*>(Data)[Index];
+		case EUEmkaValueType::Int32:  return static_cast<const int32*>(Data)[Index];
+		case EUEmkaValueType::UInt8:
+		case EUEmkaValueType::Char:
+		case EUEmkaValueType::Bool:   return static_cast<const uint8*>(Data)[Index];
+		case EUEmkaValueType::UInt16: return static_cast<const uint16*>(Data)[Index];
+		case EUEmkaValueType::UInt32: return static_cast<const uint32*>(Data)[Index];
+		case EUEmkaValueType::UInt:   return static_cast<int64>(static_cast<const uint64*>(Data)[Index]);
+		default:                      return static_cast<const int64*>(Data)[Index]; // Int, Enum
+	}
+}
+
 // ResultTypes string (RunUmkaInlineMulti) encodes EUEmkaValueType by ordinal value.
 // These asserts guard against silent breakage if the enum is reordered.
 static_assert(static_cast<int32>(EUEmkaValueType::Int)  == 0,  "EUEmkaValueType ordinal changed - update ResultTypes serialization");
@@ -86,10 +117,11 @@ static void PushUmkaParams(Umka* umka, UmkaFuncContext& Context, const TArray<FU
 				default: // all int-like types including bool, char, uint
 				{
 					umkaMakeDynArray(umka, &Header, ParamType, Param.IntArrayValue.Num());
-					int64* DataPtr = static_cast<int64*>(Header.data);
+					// Element size varies by type ([]int8 = 1 byte, []int = 8) - writing
+					// a fixed int64 stride would overflow the buffer for small types
 					for (int32 j = 0; j < Param.IntArrayValue.Num(); ++j)
 					{
-						DataPtr[j] = Param.IntArrayValue[j];
+						StoreIntElem(Header.data, j, Header.itemSize, Param.IntArrayValue[j]);
 					}
 					break;
 				}
@@ -328,11 +360,10 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 				}
 				default: // all int-like types
 				{
-					const int64* DataPtr = static_cast<const int64*>(StructuredResult.data);
 					Result.IntArrayValue.SetNum(Len);
 					for (int32 j = 0; j < Len; ++j)
 					{
-						Result.IntArrayValue[j] = DataPtr[j];
+						Result.IntArrayValue[j] = LoadIntElem(StructuredResult.data, j, ResultType);
 					}
 					break;
 				}
@@ -593,11 +624,10 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 					}
 					default: // all int-like types
 					{
-						const int64* DataPtr = static_cast<const int64*>(Header->data);
 						R.IntArrayValue.SetNum(Len);
 						for (int32 j = 0; j < Len; ++j)
 						{
-							R.IntArrayValue[j] = DataPtr[j];
+							R.IntArrayValue[j] = LoadIntElem(Header->data, j, T);
 						}
 						break;
 					}
