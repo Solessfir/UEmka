@@ -28,6 +28,9 @@ public class UmkaLib : ModuleRules
 		CppCompileWarningSettings.ShadowVariableWarningLevel = WarningLevel.Off;
 		CppCompileWarningSettings.UndefinedIdentifierWarningLevel = WarningLevel.Off;
 
+		// Suppress MSVC C4702 (unreachable code) in vendored Umka sources
+		ForceIncludeFiles.Add("UmkaSuppressWarnings.h");
+
 		if (Target.LinkType == TargetLinkType.Monolithic)
 		{
 			// Monolithic builds (Shipping): static linkage, UMKA_STATIC strips export/import
