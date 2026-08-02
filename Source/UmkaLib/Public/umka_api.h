@@ -159,6 +159,13 @@ typedef const UmkaType *(*UmkaGetFieldType)     (const UmkaType *structType, con
 typedef const UmkaType *(*UmkaGetMapKeyType)    (const UmkaType *mapType);
 typedef const UmkaType *(*UmkaGetMapItemType)   (const UmkaType *mapType);
 typedef bool (*UmkaAddClosure)                  (Umka *umka, const char *name, UmkaExternFunc func, void *upvalue);
+typedef bool (*UmkaIsStaticArrayType)           (const UmkaType *type);
+typedef bool (*UmkaIsDynArrayType)              (const UmkaType *type);
+typedef int  (*UmkaGetTypeSize)                 (const UmkaType *type);
+typedef int  (*UmkaGetArrayLen)                 (const UmkaType *arrayType);
+typedef int  (*UmkaGetFieldCount)               (const UmkaType *structType);
+typedef const UmkaType *(*UmkaGetFieldTypeByIndex)(const UmkaType *structType, int index);
+typedef int  (*UmkaGetFieldOffsetByIndex)       (const UmkaType *structType, int index);
 
 
 typedef struct
@@ -200,7 +207,14 @@ typedef struct
     UmkaGetFieldType    umkaGetFieldType;
     UmkaGetMapKeyType   umkaGetMapKeyType;
     UmkaGetMapItemType  umkaGetMapItemType;
-    UmkaAddClosure      umkaAddClosure;   
+    UmkaAddClosure      umkaAddClosure;
+    UmkaIsStaticArrayType umkaIsStaticArrayType;
+    UmkaIsDynArrayType  umkaIsDynArrayType;
+    UmkaGetTypeSize     umkaGetTypeSize;
+    UmkaGetArrayLen     umkaGetArrayLen;
+    UmkaGetFieldCount   umkaGetFieldCount;
+    UmkaGetFieldTypeByIndex umkaGetFieldTypeByIndex;
+    UmkaGetFieldOffsetByIndex umkaGetFieldOffsetByIndex;
 } UmkaAPI;
 
 
@@ -242,6 +256,13 @@ UMKA_API const UmkaType *umkaGetFieldType   (const UmkaType *structType, const c
 UMKA_API const UmkaType *umkaGetMapKeyType  (const UmkaType *mapType);
 UMKA_API const UmkaType *umkaGetMapItemType (const UmkaType *mapType);
 UMKA_API bool umkaAddClosure                (Umka *umka, const char *name, UmkaExternFunc func, void *upvalue);
+UMKA_API bool umkaIsStaticArrayType         (const UmkaType *type);
+UMKA_API bool umkaIsDynArrayType            (const UmkaType *type);
+UMKA_API int  umkaGetTypeSize               (const UmkaType *type);
+UMKA_API int  umkaGetArrayLen               (const UmkaType *arrayType);
+UMKA_API int  umkaGetFieldCount             (const UmkaType *structType);
+UMKA_API const UmkaType *umkaGetFieldTypeByIndex(const UmkaType *structType, int index);
+UMKA_API int  umkaGetFieldOffsetByIndex     (const UmkaType *structType, int index);
 
 
 static inline UmkaAPI *umkaGetAPI(Umka *umka)

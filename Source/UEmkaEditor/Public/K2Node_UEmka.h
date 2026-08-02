@@ -13,9 +13,15 @@ struct FUEmkaPinDef
 
 	EUEmkaValueType Type = EUEmkaValueType::Int;
 
-	bool bIsArray = false; // true for []type params
+	bool bIsArray = false; // true for []type and [N]type params
+
+	bool bIsStaticArray = false; // true only for fixed-size [N]type arrays
 
 	FString EnumTypeName; // set when Type == EUEmkaValueType::Enum; stores the Umka type identifier
+
+	// Storage width of a user-defined enum. Umka permits explicit bases such as enum(uint8).
+	// This is needed to reproduce Umka's struct layout for multi-return values.
+	int32 EnumByteSize = 8;
 
 	FString FriendlyName; // optional display override, e.g. "p.x" for flattened struct fields
 
@@ -66,7 +72,9 @@ struct FUEmkaSignature
 
 	TOptional<EUEmkaValueType> ReturnType; // unset = void (single return)
 
-	bool bReturnIsArray = false; // true for []type return
+	bool bReturnIsArray = false; // true for []type and [N]type returns
+
+	bool bReturnIsStaticArray = false; // true only for fixed-size [N]type returns
 
 	FString ReturnEnumTypeName; // set when ReturnType == EUEmkaValueType::Enum
 
@@ -153,12 +161,12 @@ public:
 	mutable FString LastErrorMessage;
 
 private:
-	static EUEmkaValueType ParseUmkaType(const FString& TypeName);
+	static TOptional<EUEmkaValueType> ParseUmkaType(const FString& TypeName);
 
 	static FEdGraphPinType GetPinTypeFor(EUEmkaValueType ValueType);
 
 	// Parse all "type Name = struct { ... }" declarations from the script.
-	static TArray<FUEmkaStructDef> ParseStructDefs(const FString& InScript);
+	static TArray<FUEmkaStructDef> ParseStructDefs(const FString& StructuralScript, const TMap<FString, int32>& EnumByteSizes);
 
 	// Generate the __uemka_call wrapper function source for a struct-using signature.
 	static FString BuildShimFunction(const FUEmkaSignature& Sig);

@@ -20,7 +20,188 @@ static const FName PIN_ReturnValue(TEXT("ReturnValue"));
 // Static helpers
 // -------------------------------------------------------------------------
 
-EUEmkaValueType UK2Node_UEmka::ParseUmkaType(const FString& TypeName)
+// Replaces comments and quoted literals with spaces while preserving string length and
+// line breaks. Structural parsers can then safely use source indices without finding
+// declarations inside comments/strings or counting delimiters contained by them.
+static FString MakeUEmkaStructuralView(const FString& Source)
+{
+	enum class EState : uint8
+	{
+		Code,
+		LineComment,
+		BlockComment,
+		String,
+		Char,
+	};
+
+	FString View = Source;
+	EState State = EState::Code;
+	auto Mask = [&View](const int32 Index)
+	{
+		if (View[Index] != TEXT('\n') && View[Index] != TEXT('\r'))
+		{
+			View[Index] = TEXT(' ');
+		}
+	};
+
+	for (int32 i = 0; i < View.Len(); ++i)
+	{
+		const TCHAR Ch = Source[i];
+		const TCHAR Next = i + 1 < Source.Len() ? Source[i + 1] : TEXT('\0');
+
+		switch (State)
+		{
+			case EState::Code:
+				if (Ch == TEXT('/') && Next == TEXT('/'))
+				{
+					Mask(i);
+					Mask(++i);
+					State = EState::LineComment;
+				}
+				else if (Ch == TEXT('/') && Next == TEXT('*'))
+				{
+					Mask(i);
+					Mask(++i);
+					State = EState::BlockComment;
+				}
+				else if (Ch == TEXT('"'))
+				{
+					Mask(i);
+					State = EState::String;
+				}
+				else if (Ch == TEXT('\''))
+				{
+					Mask(i);
+					State = EState::Char;
+				}
+				break;
+
+			case EState::LineComment:
+				Mask(i);
+				if (Ch == TEXT('\n') || Ch == TEXT('\r'))
+				{
+					State = EState::Code;
+				}
+				break;
+
+			case EState::BlockComment:
+				Mask(i);
+				if (Ch == TEXT('*') && Next == TEXT('/'))
+				{
+					Mask(++i);
+					State = EState::Code;
+				}
+				break;
+
+			case EState::String:
+			case EState::Char:
+			{
+				const EState QuotedState = State;
+				Mask(i);
+				if (Ch == TEXT('\\') && i + 1 < Source.Len())
+				{
+					Mask(++i);
+				}
+				else if ((QuotedState == EState::String && Ch == TEXT('"'))
+					  || (QuotedState == EState::Char && Ch == TEXT('\'')))
+				{
+					State = EState::Code;
+				}
+				break;
+			}
+		}
+	}
+
+	return View;
+}
+
+static bool IsUEmkaIdentChar(const TCHAR Ch)
+{
+	return FChar::IsAlnum(Ch) || Ch == TEXT('_');
+}
+
+// Parses declared enum storage widths. Unspecified enum bases use Umka's default int (8 bytes).
+static TMap<FString, int32> ParseUEmkaEnumByteSizes(const FString& Source, const FString& StructuralView)
+{
+	TMap<FString, int32> Result;
+	const int32 Len = StructuralView.Len();
+
+	auto SkipWhitespace = [&StructuralView, Len](int32& Pos)
+	{
+		while (Pos < Len && FChar::IsWhitespace(StructuralView[Pos]))
+		{
+			++Pos;
+		}
+	};
+
+	auto ReadIdent = [&Source, &StructuralView, Len, &SkipWhitespace](int32& Pos)
+	{
+		SkipWhitespace(Pos);
+		const int32 Start = Pos;
+		while (Pos < Len && IsUEmkaIdentChar(StructuralView[Pos]))
+		{
+			++Pos;
+		}
+		return Source.Mid(Start, Pos - Start);
+	};
+
+	auto ByteSizeForBase = [](const FString& Base)
+	{
+		if (Base == TEXT("int8") || Base == TEXT("uint8") || Base == TEXT("char") || Base == TEXT("bool")) return 1;
+		if (Base == TEXT("int16") || Base == TEXT("uint16")) return 2;
+		if (Base == TEXT("int32") || Base == TEXT("uint32")) return 4;
+		return 8; // int, uint, or an invalid base that the Umka compiler will report
+	};
+
+	for (int32 Pos = 0; Pos + 4 <= Len; ++Pos)
+	{
+		if (StructuralView.Mid(Pos, 4) != TEXT("type")
+			|| (Pos > 0 && IsUEmkaIdentChar(StructuralView[Pos - 1]))
+			|| (Pos + 4 < Len && IsUEmkaIdentChar(StructuralView[Pos + 4])))
+		{
+			continue;
+		}
+
+		int32 P = Pos + 4;
+		const FString TypeName = ReadIdent(P);
+		if (TypeName.IsEmpty())
+		{
+			continue;
+		}
+
+		SkipWhitespace(P);
+		if (P < Len && StructuralView[P] == TEXT('*'))
+		{
+			++P;
+			SkipWhitespace(P);
+		}
+		if (P >= Len || StructuralView[P] != TEXT('='))
+		{
+			continue;
+		}
+
+		++P;
+		const FString DeclarationKind = ReadIdent(P);
+		if (DeclarationKind != TEXT("enum"))
+		{
+			continue;
+		}
+
+		int32 ByteSize = 8;
+		SkipWhitespace(P);
+		if (P < Len && StructuralView[P] == TEXT('('))
+		{
+			++P;
+			ByteSize = ByteSizeForBase(ReadIdent(P));
+		}
+		Result.Add(TypeName, ByteSize);
+		Pos = P;
+	}
+
+	return Result;
+}
+
+TOptional<EUEmkaValueType> UK2Node_UEmka::ParseUmkaType(const FString& TypeName)
 {
 	if (TypeName == TEXT("int"))    return EUEmkaValueType::Int;
 	if (TypeName == TEXT("int8"))   return EUEmkaValueType::Int8;
@@ -35,7 +216,7 @@ EUEmkaValueType UK2Node_UEmka::ParseUmkaType(const FString& TypeName)
 	if (TypeName == TEXT("real"))   return EUEmkaValueType::Real;
 	if (TypeName == TEXT("real32")) return EUEmkaValueType::Real32;
 	if (TypeName == TEXT("str"))    return EUEmkaValueType::Str;
-	return EUEmkaValueType::Enum; // unknown identifier = user-defined enum type
+	return {};
 }
 
 FEdGraphPinType UK2Node_UEmka::GetPinTypeFor(EUEmkaValueType ValueType)
@@ -87,7 +268,7 @@ FEdGraphPinType UK2Node_UEmka::GetPinTypeFor(EUEmkaValueType ValueType)
 // Struct declaration parser
 // -------------------------------------------------------------------------
 
-TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript)
+TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript, const TMap<FString, int32>& EnumByteSizes)
 {
 	TArray<FUEmkaStructDef> Structs;
 	const int32 Len = InScript.Len();
@@ -184,7 +365,8 @@ TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript)
 
 			const FString TypeText = Chunk.Mid(ColonIdx + 1).TrimStartAndEnd();
 
-			// Only plain primitive/str/enum field types can cross the pin boundary
+			// Only plain primitive/str/declared-enum field types can cross the pin boundary.
+			// Unknown identifiers include aliases and are deliberately not guessed to be enums.
 			const bool bComplexType = TypeText.IsEmpty()
 				|| TypeText.Contains(TEXT("["))
 				|| TypeText.Contains(TEXT("^"))
@@ -193,7 +375,8 @@ TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript)
 				|| TypeText.StartsWith(TEXT("fn"))
 				|| TypeText.StartsWith(TEXT("weak"))
 				|| TypeText.StartsWith(TEXT("interface"))
-				|| Raw.ContainsByPredicate([&TypeText](const FRawStruct& S) { return S.Name == TypeText; });
+				|| Raw.ContainsByPredicate([&TypeText](const FRawStruct& S) { return S.Name == TypeText; })
+				|| (!ParseUmkaType(TypeText).IsSet() && !EnumByteSizes.Contains(TypeText));
 			if (bComplexType)
 			{
 				Def.bPinSafe = false;
@@ -228,8 +411,10 @@ TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript)
 FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 {
 	FUEmkaSignature Sig;
+	const FString StructuralScript = MakeUEmkaStructuralView(InScript);
+	const TMap<FString, int32> EnumByteSizes = ParseUEmkaEnumByteSizes(InScript, StructuralScript);
 
-	const TArray<FUEmkaStructDef> Structs = ParseStructDefs(InScript);
+	const TArray<FUEmkaStructDef> Structs = ParseStructDefs(StructuralScript, EnumByteSizes);
 	auto FindStruct = [&Structs](const FString& TypeName) -> const FUEmkaStructDef*
 	{
 		return Structs.FindByPredicate([&TypeName](const FUEmkaStructDef& S) { return S.Name == TypeName; });
@@ -241,65 +426,68 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 
 	auto SkipWhitespace = [&]()
 	{
-		while (Pos < Len && FChar::IsWhitespace(InScript[Pos])) ++Pos;
+		while (Pos < Len && FChar::IsWhitespace(StructuralScript[Pos])) ++Pos;
 	};
 
 	auto ReadIdent = [&]() -> FString
 	{
 		SkipWhitespace();
 		const int32 Start = Pos;
-		while (Pos < Len && (FChar::IsAlnum(InScript[Pos]) || InScript[Pos] == '_')) ++Pos;
+		while (Pos < Len && IsUEmkaIdentChar(StructuralScript[Pos])) ++Pos;
 		return InScript.Mid(Start, Pos - Start);
 	};
 
-	// Scan for "fn" keyword followed by whitespace
+	// Scan for the first exported function. Private helpers are skipped, and the structural
+	// view prevents "fn" text inside comments or quoted literals from being considered.
+	FString FuncName;
+	bool bFoundExportedFunction = false;
 	while (Pos < Len)
 	{
-		// Look for 'f' 'n' then whitespace
 		if (Pos + 2 < Len
-			&& InScript[Pos] == 'f'
-			&& InScript[Pos + 1] == 'n'
-			&& FChar::IsWhitespace(InScript[Pos + 2]))
+			&& StructuralScript[Pos] == 'f'
+			&& StructuralScript[Pos + 1] == 'n'
+			&& FChar::IsWhitespace(StructuralScript[Pos + 2]))
 		{
-			// Make sure 'fn' is not part of a larger identifier
-			const bool bAtWordBoundary = (Pos == 0) || !FChar::IsAlnum(InScript[Pos - 1]);
+			const bool bAtWordBoundary = Pos == 0 || !IsUEmkaIdentChar(StructuralScript[Pos - 1]);
 			if (bAtWordBoundary)
 			{
+				const int32 CandidateStart = Pos;
 				Pos += 2;
-				break;
+				const FString CandidateName = ReadIdent();
+				SkipWhitespace();
+				if (!CandidateName.IsEmpty() && Pos < Len && StructuralScript[Pos] == TEXT('*'))
+				{
+					++Pos;
+					SkipWhitespace();
+					if (Pos < Len && StructuralScript[Pos] == TEXT('('))
+					{
+						FuncName = CandidateName;
+						++Pos;
+						bFoundExportedFunction = true;
+						break;
+					}
+				}
+				Pos = CandidateStart + 2;
+				continue;
 			}
 		}
 		++Pos;
 	}
 
-	if (Pos >= Len) return Sig;
-
-	// Read function name
-	FString FuncName = ReadIdent();
-	if (FuncName.IsEmpty()) return Sig;
-
-	// Require export marker '*'
-	SkipWhitespace();
-	if (Pos >= Len || InScript[Pos] != '*') return Sig;
-	++Pos;
-
-	// Require '('
-	SkipWhitespace();
-	if (Pos >= Len || InScript[Pos] != '(') return Sig;
-	++Pos;
+	if (!bFoundExportedFunction) return Sig;
 
 	// Collect everything inside the parameter parens (handle nested parens)
 	const int32 ParamStart = Pos;
 	int32 Depth = 1;
 	while (Pos < Len && Depth > 0)
 	{
-		if (InScript[Pos] == '(') ++Depth;
-		else if (InScript[Pos] == ')') --Depth;
+		if (StructuralScript[Pos] == '(') ++Depth;
+		else if (StructuralScript[Pos] == ')') --Depth;
 		if (Depth > 0) ++Pos;
 	}
 	if (Depth != 0) return Sig; // unmatched parens
 
-	const FString ParamStr = InScript.Mid(ParamStart, Pos - ParamStart).TrimStartAndEnd();
+	const FString ParamStr = StructuralScript.Mid(ParamStart, Pos - ParamStart).TrimStartAndEnd();
 	++Pos; // skip closing ')'
 
 	// Parse parameter list: handles grouped "a, b: int, c: real"
@@ -308,11 +496,14 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 		TArray<FString> NameGroup;
 		FString Token;
 
-		auto FlushGroup = [&](const FString& TypeName, bool bIsArray, const FString& ArrayPrefix)
+		auto FlushGroup = [&](const FString& TypeName, const bool bIsArray, const bool bIsStaticArray, const FString& ArrayPrefix)
 		{
 			const FString TrimmedTypeName = TypeName.TrimStartAndEnd();
-			const EUEmkaValueType VType = ParseUmkaType(TrimmedTypeName);
-			const FUEmkaStructDef* StructDef = (VType == EUEmkaValueType::Enum) ? FindStruct(TrimmedTypeName) : nullptr;
+			const TOptional<EUEmkaValueType> PrimitiveType = ParseUmkaType(TrimmedTypeName);
+			const bool bIsDeclaredEnum = EnumByteSizes.Contains(TrimmedTypeName);
+			const FUEmkaStructDef* StructDef = FindStruct(TrimmedTypeName);
+			const bool bIsSupportedScalar = PrimitiveType.IsSet() || bIsDeclaredEnum;
+			const EUEmkaValueType VType = PrimitiveType.IsSet() ? PrimitiveType.GetValue() : EUEmkaValueType::Enum;
 
 			for (const FString& PName : NameGroup)
 			{
@@ -346,15 +537,29 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 					{
 						FUEmkaPinDef Def;
 						Def.Name = FString::Printf(TEXT("%s_%s"), *TrimmedName, *Field.Name);
-						Def.Type = ParseUmkaType(Field.TypeText);
+						const TOptional<EUEmkaValueType> FieldPrimitiveType = ParseUmkaType(Field.TypeText);
+						Def.Type = FieldPrimitiveType.IsSet() ? FieldPrimitiveType.GetValue() : EUEmkaValueType::Enum;
 						Def.FriendlyName = FString::Printf(TEXT("%s.%s"), *TrimmedName, *Field.Name);
 						if (Def.Type == EUEmkaValueType::Enum)
 						{
 							Def.EnumTypeName = Field.TypeText;
+							if (const int32* ByteSize = EnumByteSizes.Find(Field.TypeText))
+							{
+								Def.EnumByteSize = *ByteSize;
+							}
 							Def.FriendlyName += FString::Printf(TEXT(" (%s)"), *Field.TypeText);
 						}
 						Sig.Params.Add(Def);
 					}
+					continue;
+				}
+
+				if (!bIsSupportedScalar)
+				{
+					Sig.UnsupportedReason = FString::Printf(
+						TEXT("parameter '%s' has unsupported type '%s'; only primitives, declared enums, supported structs, and arrays of supported scalars can be passed as pins"),
+						*TrimmedName,
+						*TrimmedTypeName);
 					continue;
 				}
 
@@ -366,9 +571,14 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				Def.Name = TrimmedName;
 				Def.Type = VType;
 				Def.bIsArray = bIsArray;
+				Def.bIsStaticArray = bIsStaticArray;
 				if (VType == EUEmkaValueType::Enum)
 				{
 					Def.EnumTypeName = TrimmedTypeName;
+					if (const int32* ByteSize = EnumByteSizes.Find(TrimmedTypeName))
+					{
+						Def.EnumByteSize = *ByteSize;
+					}
 				}
 				Sig.Params.Add(Def);
 			}
@@ -400,15 +610,19 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				// Skip whitespace
 				while (i < ParamStr.Len() && FChar::IsWhitespace(ParamStr[i])) ++i;
 
-				// Detect dynamic array prefix []  (static [N] also consumed, treated as dynamic)
+				// Blueprint represents both Umka array kinds as array pins, but fixed [N]T
+				// values use different ABI storage and are tracked separately.
 				bool bIsArray = false;
+				bool bIsStaticArray = false;
 				FString ArrayPrefix;
 				if (i < ParamStr.Len() && ParamStr[i] == '[')
 				{
 					bIsArray = true;
 					const int32 PrefixStart = i;
 					++i;
+					const int32 LengthExprStart = i;
 					while (i < ParamStr.Len() && ParamStr[i] != ']') ++i;
+					bIsStaticArray = !ParamStr.Mid(LengthExprStart, i - LengthExprStart).TrimStartAndEnd().IsEmpty();
 					if (i < ParamStr.Len()) ++i; // skip ']'
 					ArrayPrefix = ParamStr.Mid(PrefixStart, i - PrefixStart);
 					while (i < ParamStr.Len() && FChar::IsWhitespace(ParamStr[i])) ++i;
@@ -421,7 +635,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 					TypeName += ParamStr[i];
 					++i;
 				}
-				FlushGroup(TypeName, bIsArray, ArrayPrefix);
+				FlushGroup(TypeName, bIsArray, bIsStaticArray, ArrayPrefix);
 				--i; // outer loop will increment past the comma
 			}
 			else
@@ -440,7 +654,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 	// Capture raw return type text (between ')' and the body '{') for shim forwarding
 	{
 		int32 BodyBrace = Pos;
-		while (BodyBrace < Len && InScript[BodyBrace] != '{') ++BodyBrace;
+		while (BodyBrace < Len && StructuralScript[BodyBrace] != '{') ++BodyBrace;
 		FString RetText = InScript.Mid(Pos, BodyBrace - Pos).TrimStartAndEnd();
 		if (RetText.StartsWith(TEXT(":")))
 		{
@@ -452,26 +666,29 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 
 	// Parse return type after ')'
 	SkipWhitespace();
-	if (Pos < Len && InScript[Pos] == ':')
+	if (Pos < Len && StructuralScript[Pos] == ':')
 	{
 		++Pos;
 		SkipWhitespace();
 
-		if (Pos < Len && InScript[Pos] == '(')
+		if (Pos < Len && StructuralScript[Pos] == '(')
 		{
 			++Pos; // skip '('
 			int32 RetIdx = 0;
-			while (Pos < Len && InScript[Pos] != ')')
+			while (Pos < Len && StructuralScript[Pos] != ')')
 			{
 				SkipWhitespace();
-				if (Pos >= Len || InScript[Pos] == ')') break;
+				if (Pos >= Len || StructuralScript[Pos] == ')') break;
 
 				bool bIsArray = false;
-				if (InScript[Pos] == '[')
+				bool bIsStaticArray = false;
+				if (StructuralScript[Pos] == '[')
 				{
 					bIsArray = true;
 					++Pos;
-					while (Pos < Len && InScript[Pos] != ']') ++Pos;
+					const int32 LengthExprStart = Pos;
+					while (Pos < Len && StructuralScript[Pos] != ']') ++Pos;
+					bIsStaticArray = !StructuralScript.Mid(LengthExprStart, Pos - LengthExprStart).TrimStartAndEnd().IsEmpty();
 					if (Pos < Len) ++Pos; // skip ']'
 					SkipWhitespace();
 				}
@@ -479,33 +696,55 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				const FString TypeName = ReadIdent();
 				if (!TypeName.IsEmpty() && TypeName != TEXT("void"))
 				{
+					const TOptional<EUEmkaValueType> PrimitiveType = ParseUmkaType(TypeName);
+					const bool bIsDeclaredEnum = EnumByteSizes.Contains(TypeName);
 					if (FindStruct(TypeName))
 					{
 						Sig.UnsupportedReason = FString::Printf(TEXT("struct '%s' inside a multi-return tuple cannot be passed as pins"), *TypeName);
 					}
-					FUEmkaPinDef Def;
-					Def.Name = FString::Printf(TEXT("item%d"), RetIdx++);
-					Def.Type = ParseUmkaType(TypeName);
-					Def.bIsArray = bIsArray;
-					if (Def.Type == EUEmkaValueType::Enum)
+					else if (!PrimitiveType.IsSet() && !bIsDeclaredEnum)
 					{
-						Def.EnumTypeName = TypeName;
+						Sig.UnsupportedReason = FString::Printf(
+							TEXT("multi-return item has unsupported type '%s'; only primitives, declared enums, and arrays of supported scalars can be returned as pins"),
+							*TypeName);
 					}
-					Sig.ReturnParams.Add(Def);
+					else
+					{
+						FUEmkaPinDef Def;
+						Def.Name = FString::Printf(TEXT("item%d"), RetIdx++);
+						Def.Type = PrimitiveType.IsSet() ? PrimitiveType.GetValue() : EUEmkaValueType::Enum;
+						Def.bIsArray = bIsArray;
+						Def.bIsStaticArray = bIsStaticArray;
+						if (Def.Type == EUEmkaValueType::Enum)
+						{
+							Def.EnumTypeName = TypeName;
+							if (const int32* ByteSize = EnumByteSizes.Find(TypeName))
+							{
+								Def.EnumByteSize = *ByteSize;
+							}
+						}
+						Sig.ReturnParams.Add(Def);
+					}
+				}
+				else if (TypeName.IsEmpty())
+				{
+					Sig.UnsupportedReason = TEXT("multi-return item has an unsupported non-scalar type");
 				}
 				SkipWhitespace();
-				if (Pos < Len && InScript[Pos] == ',') ++Pos;
+				if (Pos < Len && StructuralScript[Pos] == ',') ++Pos;
 			}
-			if (Pos < Len && InScript[Pos] == ')') ++Pos;
+			if (Pos < Len && StructuralScript[Pos] == ')') ++Pos;
 		}
 		else
 		{
-			// Detect dynamic array prefix [] (static [N] also consumed, treated as dynamic)
-			if (Pos < Len && InScript[Pos] == '[')
+			// Track []T and [N]T separately; both are represented by Blueprint array pins.
+			if (Pos < Len && StructuralScript[Pos] == '[')
 			{
 				Sig.bReturnIsArray = true;
 				++Pos;
-				while (Pos < Len && InScript[Pos] != ']') ++Pos;
+				const int32 LengthExprStart = Pos;
+				while (Pos < Len && StructuralScript[Pos] != ']') ++Pos;
+				Sig.bReturnIsStaticArray = !StructuralScript.Mid(LengthExprStart, Pos - LengthExprStart).TrimStartAndEnd().IsEmpty();
 				if (Pos < Len) ++Pos; // skip ']'
 				SkipWhitespace();
 			}
@@ -514,6 +753,8 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 			if (!RetTypeName.IsEmpty() && RetTypeName != TEXT("void"))
 			{
 				const FUEmkaStructDef* StructDef = FindStruct(RetTypeName);
+				const TOptional<EUEmkaValueType> PrimitiveType = ParseUmkaType(RetTypeName);
+				const bool bIsDeclaredEnum = EnumByteSizes.Contains(RetTypeName);
 				if (StructDef && Sig.bReturnIsArray)
 				{
 					Sig.UnsupportedReason = FString::Printf(TEXT("struct arrays ([]%s) cannot be returned as pins"), *RetTypeName);
@@ -533,24 +774,39 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 					{
 						FUEmkaPinDef Def;
 						Def.Name = Field.Name;
-						Def.Type = ParseUmkaType(Field.TypeText);
+						const TOptional<EUEmkaValueType> FieldPrimitiveType = ParseUmkaType(Field.TypeText);
+						Def.Type = FieldPrimitiveType.IsSet() ? FieldPrimitiveType.GetValue() : EUEmkaValueType::Enum;
 						Def.FriendlyName = Field.Name;
 						if (Def.Type == EUEmkaValueType::Enum)
 						{
 							Def.EnumTypeName = Field.TypeText;
+							if (const int32* ByteSize = EnumByteSizes.Find(Field.TypeText))
+							{
+								Def.EnumByteSize = *ByteSize;
+							}
 							Def.FriendlyName += FString::Printf(TEXT(" (%s)"), *Field.TypeText);
 						}
 						Sig.ReturnParams.Add(Def);
 					}
 				}
-				else
+				else if (PrimitiveType.IsSet() || bIsDeclaredEnum)
 				{
-					Sig.ReturnType = ParseUmkaType(RetTypeName);
+					Sig.ReturnType = PrimitiveType.IsSet() ? PrimitiveType.GetValue() : EUEmkaValueType::Enum;
 					if (Sig.ReturnType.GetValue() == EUEmkaValueType::Enum)
 					{
 						Sig.ReturnEnumTypeName = RetTypeName;
 					}
 				}
+				else
+				{
+					Sig.UnsupportedReason = FString::Printf(
+						TEXT("return value has unsupported type '%s'; only primitives, declared enums, supported structs, and arrays of supported scalars can be returned as pins"),
+						*RetTypeName);
+				}
+			}
+			else if (RetTypeName.IsEmpty())
+			{
+				Sig.UnsupportedReason = TEXT("return value has an unsupported non-scalar type");
 			}
 		}
 
@@ -559,6 +815,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 		{
 			Sig.ReturnType = Sig.ReturnParams[0].Type;
 			Sig.bReturnIsArray = Sig.ReturnParams[0].bIsArray;
+			Sig.bReturnIsStaticArray = Sig.ReturnParams[0].bIsStaticArray;
 			Sig.ReturnEnumTypeName = Sig.ReturnParams[0].EnumTypeName;
 			Sig.ReturnParams.Empty();
 		}
@@ -575,6 +832,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 		Sig.ReturnParams.Empty();
 		Sig.ReturnType.Reset();
 		Sig.bReturnIsArray = false;
+		Sig.bReturnIsStaticArray = false;
 		Sig.ReturnEnumTypeName.Empty();
 		Sig.ShimParams.Empty();
 		Sig.ReturnStructName.Empty();
@@ -990,11 +1248,13 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 
 	if (bMultiReturn)
 	{
-		// Set ResultTypes: "type:isArray" pairs (e.g. "0:0,12:0" = int,str  or  "0:1,12:0" = []int,str)
+		// Set ResultTypes: "type:arrayKind:enumByteSize" triples. arrayKind is
+		// 0 for scalar, 1 for []T, and 2 for [N]T.
 		TArray<FString> TypeValues;
 		for (const FUEmkaPinDef& Def : ParsedSignature.ReturnParams)
 		{
-			TypeValues.Add(FString::Printf(TEXT("%d:%d"), static_cast<int32>(Def.Type), Def.bIsArray ? 1 : 0));
+			const int32 ArrayKind = Def.bIsStaticArray ? 2 : (Def.bIsArray ? 1 : 0);
+			TypeValues.Add(FString::Printf(TEXT("%d:%d:%d"), static_cast<int32>(Def.Type), ArrayKind, Def.EnumByteSize));
 		}
 		CallNode->FindPinChecked(TEXT("ResultTypes"))->DefaultValue = FString::Join(TypeValues, TEXT(","));
 	}
@@ -1008,6 +1268,10 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 		if (UEdGraphPin* IsArrayPin = CallNode->FindPin(TEXT("bResultIsArray")))
 		{
 			IsArrayPin->DefaultValue = ParsedSignature.bReturnIsArray ? TEXT("true") : TEXT("false");
+		}
+		if (UEdGraphPin* IsStaticArrayPin = CallNode->FindPin(TEXT("bResultIsStaticArray")))
+		{
+			IsStaticArrayPin->DefaultValue = ParsedSignature.bReturnIsStaticArray ? TEXT("true") : TEXT("false");
 		}
 	}
 
@@ -1057,6 +1321,10 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 			if (UEdGraphPin* TypePin = MakeParamNode->FindPin(TEXT("Type")))
 			{
 				TypePin->DefaultValue = UEnum::GetValueAsString(Param.Type);
+			}
+			if (UEdGraphPin* IsStaticArrayPin = MakeParamNode->FindPin(TEXT("bIsStaticArray")))
+			{
+				IsStaticArrayPin->DefaultValue = Param.bIsStaticArray ? TEXT("true") : TEXT("false");
 			}
 
 			// Connect our input pin -> helper Values/Value pin

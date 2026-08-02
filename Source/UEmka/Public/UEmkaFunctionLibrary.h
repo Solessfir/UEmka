@@ -59,6 +59,10 @@ struct FUEmkaScriptParam
 	UPROPERTY(BlueprintReadWrite, Category = "UEmka")
 	bool bIsArray = false;
 
+	// Fixed-size [N]T arrays use inline Umka storage instead of a dynamic-array header.
+	UPROPERTY(BlueprintReadWrite, Category = "UEmka")
+	bool bIsStaticArray = false;
+
 	// Array storage - only one is populated, matching Type
 	UPROPERTY(BlueprintReadWrite, Category = "UEmka")
 	TArray<int64> IntArrayValue;
@@ -81,10 +85,12 @@ class UEMKA_API UUEmkaFunctionLibrary : public UBlueprintFunctionLibrary
 public:
 	// Used by UK2Node_UEmka ExpandNode only. Executes a script inline with ordered typed parameters.
 	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
-	static bool RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, FUEmkaScriptParam& Result, FString& Error);
+	static bool RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error);
 
 	// Used by UK2Node_UEmka ExpandNode only for multi-return functions (fn foo*(): (int, str)).
-	// ResultTypes is a comma-separated list of EUEmkaValueType integer values (e.g. "0,12" for int, str).
+	// ResultTypes is a comma-separated list of type:arrayKind:enumByteSize triples.
+	// arrayKind is 0 for scalar, 1 for []T, and 2 for [N]T. The third field preserves
+	// explicit enum bases for compatibility; runtime layout comes from compiled type metadata.
 	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
 	static bool RunUmkaInlineMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error);
 
@@ -138,24 +144,24 @@ public:
 
 	// []int8, []int16, []int32, []uint16, []uint32, []bool - BP pin is TArray<int> (int32)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeIntArrayParam(const EUEmkaValueType Type, const TArray<int32>& Values);
+	static FUEmkaScriptParam MakeIntArrayParam(const EUEmkaValueType Type, const TArray<int32>& Values, const bool bIsStaticArray);
 
 	// []uint8, []char, []MyEnum - BP pin is TArray<uint8> (Byte), matching the node's Array of Byte pin
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeByteArrayParam(const EUEmkaValueType Type, const TArray<uint8>& Values);
+	static FUEmkaScriptParam MakeByteArrayParam(const EUEmkaValueType Type, const TArray<uint8>& Values, const bool bIsStaticArray);
 
 	// []uint - BP pin is TArray<int64>
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeInt64ArrayParam(const EUEmkaValueType Type, const TArray<int64>& Values);
+	static FUEmkaScriptParam MakeInt64ArrayParam(const EUEmkaValueType Type, const TArray<int64>& Values, const bool bIsStaticArray);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeRealArrayParam(const TArray<double>& Values);
+	static FUEmkaScriptParam MakeRealArrayParam(const TArray<double>& Values, const bool bIsStaticArray);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeReal32ArrayParam(const TArray<float>& Values);
+	static FUEmkaScriptParam MakeReal32ArrayParam(const TArray<float>& Values, const bool bIsStaticArray);
 
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
-	static FUEmkaScriptParam MakeStrArrayParam(const TArray<FString>& Values);
+	static FUEmkaScriptParam MakeStrArrayParam(const TArray<FString>& Values, const bool bIsStaticArray);
 
 	// --- Array result extraction helpers (ExpandNode intermediate graph only) ---
 

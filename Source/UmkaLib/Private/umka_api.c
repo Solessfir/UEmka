@@ -379,6 +379,52 @@ UMKA_API const UmkaType *umkaGetMapItemType(const UmkaType *mapType)
 }
 
 
+UMKA_API bool umkaIsStaticArrayType(const UmkaType *type)
+{
+    return type && type->kind == TYPE_ARRAY;
+}
+
+
+UMKA_API bool umkaIsDynArrayType(const UmkaType *type)
+{
+    return type && type->kind == TYPE_DYNARRAY;
+}
+
+
+UMKA_API int umkaGetTypeSize(const UmkaType *type)
+{
+    return type ? type->size : -1;
+}
+
+
+UMKA_API int umkaGetArrayLen(const UmkaType *arrayType)
+{
+    return arrayType && arrayType->kind == TYPE_ARRAY ? arrayType->numItems : -1;
+}
+
+
+UMKA_API int umkaGetFieldCount(const UmkaType *structType)
+{
+    return structType && structType->kind == TYPE_STRUCT ? structType->numItems : -1;
+}
+
+
+UMKA_API const UmkaType *umkaGetFieldTypeByIndex(const UmkaType *structType, int index)
+{
+    if (!structType || structType->kind != TYPE_STRUCT || index < 0 || index >= structType->numItems)
+        return NULL;
+    return structType->field[index]->type;
+}
+
+
+UMKA_API int umkaGetFieldOffsetByIndex(const UmkaType *structType, int index)
+{
+    if (!structType || structType->kind != TYPE_STRUCT || index < 0 || index >= structType->numItems)
+        return -1;
+    return structType->field[index]->offset;
+}
+
+
 UMKA_API bool umkaAddClosure(Umka *umka, const char *name, UmkaExternFunc func, void *upvalue)
 {
     return compilerAddClosure(umka, name, func, upvalue);

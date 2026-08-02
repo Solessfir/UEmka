@@ -121,7 +121,7 @@ A single-element list like `(int)` is treated the same as a plain `int` return.
 
 ### Arrays
 
-Prefix any type with `[]` to get an array pin. Both dynamic (`[]type`) and static (`[N]type`) array syntax are accepted - both produce a Blueprint array pin of the corresponding element type.
+Prefix any supported scalar type with `[]` or `[N]` to get an array pin. Dynamic (`[]type`) and fixed-size (`[N]type`) arrays both appear as Blueprint arrays, but retain their native Umka ABI. A fixed-size input must contain exactly `N` elements; otherwise execution fails with an error reporting the required and supplied lengths. Constant expressions in `[N]` are supported because the final length is read from the compiled Umka type.
 
 ```
 fn double*(nums: []int): []int {
@@ -145,6 +145,8 @@ fn double*(nums: []int): []int {
 | `[]real32`      | Array of Float      |
 | `[]str`         | Array of String     |
 | `[]MyEnum` (user-defined enum) | Array of Byte |
+
+The same pin mapping applies to fixed-size forms such as `[4]int` and `[Count]real`. Fixed-size return values are copied from Umka's inline array storage back into the Blueprint array.
 
 ### Structs
 
@@ -227,6 +229,8 @@ The following Umka features are not currently supported as Blueprint pins:
 - **Closures / function types** - `fn(int): int` cannot be passed as a pin
 - **Pointers** - `^type` and `weak ^type` are not supported
 - **Pointers inside multi-return** - `fn foo*(): (^int, str)` is not supported
+- **Type aliases in exported signatures** - aliases such as `type Score = int` are rejected instead of being guessed to be enums; use the underlying supported type at the pin boundary
+- **Unknown or undeclared types** - only built-in scalar types, enums declared in the script, supported structs, and arrays of supported scalar types are accepted
 
 All of the above can still be used freely **inside** your script as local variables, helper types, and intermediate values - the restriction applies only to the exported function's signature (its parameters and return type).
 
