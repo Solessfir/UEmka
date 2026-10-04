@@ -13,11 +13,9 @@ public class UEmka : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
-				"Engine"
+				"Engine",
+				"UmkaLib"
 			}
 		);
-
-		// Umka interpreter, compiled from vendored sources - see Source/UmkaLib
-		PrivateDependencyModuleNames.Add("UmkaLib");
 	}
 }

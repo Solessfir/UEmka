@@ -34,6 +34,7 @@ struct UEMKA_API FUEmkaCompiledValue
 {
 	FString Name;
 	FString TypeName;
+	FString NativeStructName;
 	EUEmkaValueType Type = EUEmkaValueType::Void;
 	bool bSupported = false;
 	bool bIsArray = false;
@@ -52,6 +53,7 @@ struct UEMKA_API FUEmkaCompiledValue
 	{
 		return Name.Equals(Other.Name, ESearchCase::CaseSensitive)
 			&& TypeName.Equals(Other.TypeName, ESearchCase::CaseSensitive)
+			&& NativeStructName.Equals(Other.NativeStructName, ESearchCase::CaseSensitive)
 			&& DefaultValue.Equals(Other.DefaultValue, ESearchCase::CaseSensitive)
 			&& Type == Other.Type && bSupported == Other.bSupported
 			&& bIsArray == Other.bIsArray && bIsStaticArray == Other.bIsStaticArray
@@ -66,6 +68,19 @@ struct UEMKA_API FUEmkaCompiledSignature
 {
 	TArray<FUEmkaCompiledValue> Params;
 	FUEmkaCompiledValue Result;
+};
+
+USTRUCT(BlueprintType)
+struct FUEmkaExecutionOptions
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution")
+	bool bUseSession = false;
+
+	// Zero leaves execution unlimited. Each call starts a new instruction budget.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution", Meta = (ClampMin = "0", UIMin = "0"))
+	int64 MaxInstructions = 0;
 };
 
 // Ordered, typed parameter for RunUmkaInline. One element per Umka function parameter.
@@ -126,6 +141,26 @@ class UEMKA_API UUEmkaFunctionLibrary : public UBlueprintFunctionLibrary
 	GENERATED_BODY()
 
 public:
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller", AutoCreateRefTerm = "SessionId,Options"), Category = "UEmka")
+	static bool RunUmkaInlineConfigured(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options);
+
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller", AutoCreateRefTerm = "SessionId,Options"), Category = "UEmka")
+	static bool RunUmkaInlineMultiConfigured(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options);
+
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller", AutoCreateRefTerm = "SessionId,Options"), Category = "UEmka")
+	static bool RunUmkaAssetConfigured(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options);
+
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller", AutoCreateRefTerm = "SessionId,Options"), Category = "UEmka")
+	static bool RunUmkaAssetMultiConfigured(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options);
+
+	UFUNCTION(BlueprintCallable, Category = "UEmka|Execution", Meta = (DefaultToSelf = "Caller"))
+	static bool ResetRuntimeSession(UObject* Caller, const FGuid& SessionId);
+
+	// May be requested from another thread; the VM observes it at dispatch boundaries.
+	static bool CancelExecution(UObject* Caller, const FGuid& SessionId);
+	static void ResetAllRuntimeSessions();
+	static void CleanupInvalidRuntimeSessions();
+
 	// Used by UK2Node_UEmka ExpandNode only. Executes a script inline with ordered typed parameters.
 	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
 	static bool RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error);

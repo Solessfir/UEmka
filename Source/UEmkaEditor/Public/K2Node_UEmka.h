@@ -129,6 +129,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Use native Blueprint structs instead of flattening individual struct parameters and results."))
 	bool bNativeStructPins = false;
 
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ShowOnlyInnerProperties))
+	FUEmkaExecutionOptions ExecutionOptions;
+
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Expose Success and Error outputs for handling runtime failures."))
+	bool bExposeRuntimeStatus = false;
+
 	// UK2Node interface
 	virtual void AllocateDefaultPins() override;
 	virtual void PreloadRequiredAssets() override;
@@ -185,6 +191,7 @@ public:
 	mutable FString LastErrorMessage;
 
 private:
+	FName GetRuntimeStatusPinName(FName Name) const;
 	bool ResolveCurrentSource(FString& OutSource, FString& OutFileName, TArray<FUEmkaModuleSource>& OutModules, FString& OutError) const;
 	FUEmkaSignature ParseCurrentScript() const;
 	static TOptional<EUEmkaValueType> ParseUmkaType(const FString& TypeName);

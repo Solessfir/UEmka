@@ -51,8 +51,9 @@ static void runtimeError(Umka *umka, int code, const char *format, ...)
     va_list args;
     va_start(args, format);
 
-    const DebugInfo *debug = &umka->vm.fiber->debugPerInstr[umka->vm.fiber->ip];
-    errorReportInit(&umka->error.report, &umka->storage, debug->fileName, debug->fnName, debug->line, 1, code, format, args);
+    const Fiber *fiber = umka->vm.fiber;
+    const DebugInfo *debug = fiber && fiber->debugPerInstr && fiber->ip >= 0 && fiber->ip < umka->gen.ip ? &fiber->debugPerInstr[fiber->ip] : NULL;
+    errorReportInit(&umka->error.report, &umka->storage, debug ? debug->fileName : umka->lex.fileName, debug ? debug->fnName : "<native API>", debug ? debug->line : 0, 1, code, format, args);
 
     vmKill(&umka->vm);
 
@@ -103,6 +104,11 @@ UMKA_API bool umkaCompile(Umka *umka)
 UMKA_API int umkaRun(Umka *umka)
 {
     const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0)
+    {
+        umka->vm.instructionsRemaining = umka->vm.maxInstructions;
+        umka->vm.cancelPoll = 0;
+    }
     jmp_buf dummyJumper;
     jmp_buf *jumper = previousNesting == 0 ? &umka->error.jumper : &dummyJumper;
     if (setjmp(*jumper) == 0)
@@ -114,6 +120,8 @@ UMKA_API int umkaRun(Umka *umka)
     }
 
     umka->error.jumperNesting = previousNesting;
+    if (previousNesting == 0)
+        umka->vm.callNesting = 0;
     return umka->error.report.code;
 }
 
@@ -121,6 +129,11 @@ UMKA_API int umkaRun(Umka *umka)
 UMKA_API int umkaCall(Umka *umka, UmkaFuncContext *fn)
 {
     const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0)
+    {
+        umka->vm.instructionsRemaining = umka->vm.maxInstructions;
+        umka->vm.cancelPoll = 0;
+    }
     // Nested calls to umkaCall() should not reset the error jumper
     jmp_buf dummyJumper;
     jmp_buf *jumper = previousNesting == 0 ? &umka->error.jumper : &dummyJumper;
@@ -134,7 +147,20 @@ UMKA_API int umkaCall(Umka *umka, UmkaFuncContext *fn)
     }
 
     umka->error.jumperNesting = previousNesting;
+    if (previousNesting == 0)
+        umka->vm.callNesting = 0;
     return umka->error.report.code;
+}
+
+
+UMKA_API void umkaSetExecutionBudget(Umka *umka, uint64_t maxInstructions, UmkaCancelCallback callback, void *userData)
+{
+    if (!umka)
+        return;
+
+    umka->vm.maxInstructions = maxInstructions;
+    umka->vm.cancelCallback = callback;
+    umka->vm.cancelUserData = userData;
 }
 
 
@@ -194,24 +220,33 @@ UMKA_API bool umkaGetFunc(Umka *umka, const char *moduleName, const char *fnName
 
 UMKA_API bool umkaGetCallStack(Umka *umka, int depth, int nameSize, int *offset, char *fileName, char *fnName, int *line)
 {
-    const Slot *base = umka->vm.fiber->base;
-    int ip = umka->vm.fiber->ip;
+    if (!umka || depth < 0 || !umka->vm.fiber || !umka->vm.fiber->debugPerInstr || ((fileName || fnName) && nameSize <= 0))
+        return false;
+
+    const Fiber *fiber = umka->vm.fiber;
+    const Slot *base = fiber->base;
+    int ip = fiber->ip;
+    if (ip < 0 || ip >= umka->gen.ip)
+        return false;
 
     while (depth-- > 0)
         if (!vmUnwindCallStack(&umka->vm, &base, &ip))
             return false;
 
+    if (ip < 0 || ip >= umka->gen.ip)
+        return false;
+
     if (offset)
         *offset = ip;
 
     if (fileName)
-        snprintf(fileName, nameSize, "%s", umka->vm.fiber->debugPerInstr[ip].fileName);
+        snprintf(fileName, nameSize, "%s", fiber->debugPerInstr[ip].fileName);
 
     if (fnName)
-        snprintf(fnName, nameSize, "%s", umka->vm.fiber->debugPerInstr[ip].fnName);
+        snprintf(fnName, nameSize, "%s", fiber->debugPerInstr[ip].fnName);
 
     if (line)
-        *line = umka->vm.fiber->debugPerInstr[ip].line;
+        *line = fiber->debugPerInstr[ip].line;
 
     return true;
 }
@@ -547,6 +582,40 @@ UMKA_API const char *umkaGetTypeNameInMainModule(Umka *umka, const UmkaType *typ
     char *name = storageAdd(&umka->storage, len);
     snprintf(name, len, "%s::%s", alias, ident->name);
     return name;
+}
+
+
+UMKA_API const char *umkaGetTypeModulePath(Umka *umka, const UmkaType *type)
+{
+    if (!umka || !type || !type->typeIdent)
+        return NULL;
+
+    const int module = type->typeIdent->module;
+    if (module < 0 || module >= umka->modules.numModules || !umka->modules.module[module])
+        return NULL;
+
+    return umka->modules.module[module]->path;
+}
+
+
+UMKA_API bool umkaTypeSameDeclaration(Umka *umka, const UmkaType *type, const char *modulePath, const char *typeName)
+{
+    if (!umka || !type || !type->sameAs || !modulePath || !typeName)
+        return false;
+
+    char path[DEFAULT_STR_LEN + 1] = "";
+    if (!moduleRegularizePath(&umka->modules, modulePath, umka->modules.curFolder, path, sizeof(path)))
+        return false;
+
+    const int module = moduleFind(&umka->modules, path);
+    if (module < 0)
+        return false;
+
+    for (const Ident *ident = umka->idents.first; ident; ident = ident->next)
+        if (ident->kind == IDENT_TYPE && ident->block == 0 && ident->module == module && strcmp(ident->name, typeName) == 0)
+            return typeSameExceptMaybeIdent(type, ident->type);
+
+    return false;
 }
 
 

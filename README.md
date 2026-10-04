@@ -26,6 +26,18 @@ The node contains an inline code editor. Write an exported Umka function and the
 
 The function selector chooses any exported function in the script. **Automatic (first export)** preserves the original behavior. A missing, private, or differently capitalized selection produces a compile error. Select the node to configure its script asset and native struct pins in the Details panel.
 
+### Execution controls
+
+Enable **Expose Runtime Status** in Details to add `Success` and `Error` output pins. Execution continues through `Then` on either outcome; failed calls clear their value outputs. Runtime errors include an Umka call stack.
+
+Status outputs use `RuntimeSuccess` or `RuntimeError` when a return field already uses `Success` or `Error`; a numeric suffix resolves further collisions.
+
+**Execution Options > Max Instructions** limits VM instructions per call, including loops, fibers, and nested calls. Zero keeps execution unlimited. The C++ `CancelExecution(Caller, SessionId)` API can request cancellation from another thread; the VM checks at the first instruction and every 1,024 instructions. Neither control interrupts a native callback or builtin while it is blocked.
+
+Enable **Use Session** to reuse the compiled VM and preserve global state between calls. Sessions belong to a caller and node GUID, so separate Blueprint instances and nodes remain independent. Changing the script, selected function, or any asset module source rebuilds the VM. A fatal runtime error also rebuilds it on the next call. Session imports must come from script assets, builtin modules, or registered host modules; loose file imports are disabled in this mode. Fresh execution remains the default.
+
+Use `ResetRuntimeSession(Caller, SessionId)` to discard an idle session, or `ResetAllRuntimeSessions()` to discard idle sessions and cancel active calls. Dead owners are cleaned after garbage collection; world cleanup and engine shutdown reset sessions. Session VMs cannot execute concurrently or reenter the same session.
+
 
 
 ## Writing Scripts
@@ -198,6 +210,20 @@ Enable **Native Struct Pins** in the node's Details panel to pass individual str
 - A generated wrapper supports up to 15 flattened inputs, or 14 when returning arrays, maps, or multiple values
 - The identifier `__uemka_call` is reserved for the generated wrapper
 
+### Native Unreal types
+
+Import `ue.um` to use `ue::Vector`, `ue::Rotator`, `ue::LinearColor`, `ue::Quat`, and `ue::Transform` directly as Unreal struct pins, including supported arrays, maps, and tuple results:
+
+```
+import "ue.um"
+
+fn move*(Position: ue::Vector, Offset: ue::Vector): ue::Vector {
+    return ue::Vector{Position.X + Offset.X, Position.Y + Offset.Y, Position.Z + Offset.Z}
+}
+```
+
+Vector, Rotator, and Quat fields use `real`; LinearColor fields use `real32`. Transform contains `Rotation`, `Translation`, and `Scale3D`, and converts through Unreal's public transform accessors. Aliases retain these native mappings. Independent structs with matching names or fields remain user-defined structs.
+
 ### Maps
 
 `map[K]V` becomes a native Blueprint Map pin. Keys can be any supported integer type, a named enum, or `str`; values can be any supported scalar, named enum, or supported struct. Integer ranges follow the same rules as scalar pins.
@@ -264,6 +290,26 @@ This generates one `Integer64` input pin (`n`) and one `Integer64` output pin.
 
 ## Debugging
 
+### C++ host modules
+
+Add `UEmka` and `UmkaLib` to your module dependencies, include `UEmkaHostFunctions.h`, and register a relative `.um` module source with its `FFunction` callbacks through `UEmkaHostFunctions::RegisterModule`. Scripts import that module normally; it is available during Blueprint compilation and cooked execution. Native function names are unique across all registered modules. Builtin module paths and `rtl` function names are reserved.
+
+Register modules during application module startup so their declarations are available in the editor and cook commandlet as well as the game. Registration and unregistration happen on the game thread and discard idle sessions. They fail while a VM is active. Sources are copied, but callback code must remain loaded until `UnregisterModule` succeeds. This explicit API does not expose UObjects automatically.
+
+```cpp
+static void GameTwice(UmkaStackSlot* Params, UmkaStackSlot* Result)
+{
+    umkaGetResult(Params, Result)->intVal = umkaGetParam(Params, 0)->intVal * 2;
+}
+
+const TArray<UEmkaHostFunctions::FFunction> Functions = {{TEXT("GameTwice"), &GameTwice}};
+FString Error;
+const bool bRegistered = UEmkaHostFunctions::RegisterModule(
+    TEXT("game.um"), TEXT("fn GameTwice*(Value: int): int"), Functions, Error);
+```
+
+Scripts can then `import "game.um"` and call `game::GameTwice(21)`.
+
 `printf` output from your script is captured and forwarded to the Unreal Output Log under the `LogUEmka` category, prefixed with the function name:
 
 ```
@@ -316,13 +362,15 @@ fn length*(x: real, y: real): real {
 
 ## Tests
 
-Run the `UEmka` group in Unreal Editor's Automation window, or launch the editor with `-unattended -nullrhi -nosound -ExecCmds="Automation RunTests UEmka;Quit"`.
+Run the `UEmka` group in Unreal Editor's Automation window, or launch the editor with `-unattended -nullrhi -nosound -ExecCmds="Automation RunTests UEmka;SoftQuit"`.
 
 The suite covers every supported scalar type and enum integer base, aliases, dynamic and fixed arrays, empty containers, integer boundaries, Unicode strings, compiler-evaluated defaults, nested structs, mixed tuples, native scalar and struct-valued maps, native struct arrays, and optional native individual struct pins. Blueprint tests compile and execute supported mappings through connected input and output pins. Additional tests cover native default editing/splitting, exported function selection, module graphs and imported types, malformed composite data, rejected signatures, runtime failures and output resets, logging and concurrent capture, graph reconstruction, transaction undo/redo, compiled Blueprint and native struct package save/load, embedded editor input, and syntax highlighting.
 
-For cooked validation, run the editor commandlet `-run=UEmkaCookFixture` in a disposable C++ host project, cook its `Content/UEmkaCookValidation` directory, and run its Development game with `-ExecCmds="Automation RunTests UEmka.Cooked.AssetExecution;SoftQuit"`. The commandlet creates fixture assets only when explicitly invoked; normal editor automation tests do not create game content.
+For cooked validation, run the editor commandlet `-run=UEmkaCookFixture` in a disposable C++ host project, cook its `Content/UEmkaCookValidation` directory, and run its Development game with `-ExecCmds="Automation RunTests UEmka.Cooked;SoftQuit"`. The commandlet creates fixture assets only when explicitly invoked; normal editor automation tests do not create game content.
 
 These are integration and regression tests for the plugin's supported interfaces, rather than exhaustive tests of the Umka language or a measured line-coverage guarantee. Platform-specific logging behavior still needs validation on each supported platform.
+
+Execution tests also cover optional status outputs, native Unreal struct identity and defaults, VM instruction limits across fibers and nested calls, cancellation, persistent sessions and invalidation, managed value ownership, runtime stack traces, and host callback lifetimes. Cooked fixtures exercise these interfaces through compiled Blueprint functions.
 
 ## License
 

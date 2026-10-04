@@ -4,6 +4,7 @@
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
 #include "UObject/EnumProperty.h"
+#include "UObject/NoExportTypes.h"
 #include "UObject/StrProperty.h"
 #include "UObject/TextProperty.h"
 #include "UObject/UnrealType.h"
@@ -84,6 +85,14 @@ namespace
 		FMemory::Memcpy(Data, &Value, sizeof(T));
 	}
 
+	TUniquePtr<FStructProperty> MathProperty(UScriptStruct* Struct)
+	{
+		TUniquePtr<FStructProperty> Property = MakeUnique<FStructProperty>(nullptr, NAME_None);
+		Property->Struct = Struct;
+		Property->SetElementSize(Struct->GetStructureSize());
+		return Property;
+	}
+
 	bool FromProperty(const FProperty* Property, const void* Data, FValue& Value, FString& Error, int32 Depth, int32& Nodes, bool bSingle = false)
 	{
 		if (!Property || !Data || !Enter(Depth, Nodes, Error))
@@ -137,6 +146,21 @@ namespace
 		{
 			Value.Kind = EKind::Struct;
 			Value.String = Struct->Struct->GetName();
+			if (Struct->Struct == TBaseStructure<FTransform>::Get())
+			{
+				// FTransform uses SIMD storage; its public accessors preserve the logical field layout.
+				const FTransform& Transform = *static_cast<const FTransform*>(Data);
+				const FQuat Rotation = Transform.GetRotation();
+				const FVector Translation = Transform.GetTranslation();
+				const FVector Scale = Transform.GetScale3D();
+				Value.Names = {TEXT("Rotation"), TEXT("Translation"), TEXT("Scale3D")};
+				Value.Children.SetNum(3);
+				const TUniquePtr<FStructProperty> Quat = MathProperty(TBaseStructure<FQuat>::Get());
+				const TUniquePtr<FStructProperty> Vector = MathProperty(TBaseStructure<FVector>::Get());
+				return FromProperty(Quat.Get(), &Rotation, Value.Children[0], Error, Depth + 1, Nodes)
+					&& FromProperty(Vector.Get(), &Translation, Value.Children[1], Error, Depth + 1, Nodes)
+					&& FromProperty(Vector.Get(), &Scale, Value.Children[2], Error, Depth + 1, Nodes);
+			}
 			for (TFieldIterator<FProperty> It(Struct->Struct); It; ++It)
 			{
 				if (Value.Children.Num() >= MaxItems) return Fail(Error, TEXT("Struct has too many fields."));
@@ -214,6 +238,24 @@ namespace
 		if (FStructProperty* Struct = CastField<FStructProperty>(Property))
 		{
 			if (Value.Kind != EKind::Struct) return Fail(Error, TEXT("Expected a struct."));
+			if (Struct->Struct == TBaseStructure<FTransform>::Get())
+			{
+				if (Value.Children.Num() != 3) return Fail(Error, TEXT("Composite transform must contain Rotation, Translation and Scale3D."));
+				const int32 RotationIndex = Value.Names.IndexOfByPredicate([](const FString& Name) { return Name.Equals(TEXT("Rotation"), ESearchCase::CaseSensitive); });
+				const int32 TranslationIndex = Value.Names.IndexOfByPredicate([](const FString& Name) { return Name.Equals(TEXT("Translation"), ESearchCase::CaseSensitive); });
+				const int32 ScaleIndex = Value.Names.IndexOfByPredicate([](const FString& Name) { return Name.Equals(TEXT("Scale3D"), ESearchCase::CaseSensitive); });
+				if (RotationIndex == INDEX_NONE || TranslationIndex == INDEX_NONE || ScaleIndex == INDEX_NONE) return Fail(Error, TEXT("Composite transform is missing a native field."));
+				FQuat Rotation = FQuat::Identity;
+				FVector Translation = FVector::ZeroVector;
+				FVector Scale = FVector::OneVector;
+				const TUniquePtr<FStructProperty> Quat = MathProperty(TBaseStructure<FQuat>::Get());
+				const TUniquePtr<FStructProperty> Vector = MathProperty(TBaseStructure<FVector>::Get());
+				if (!ToProperty(Value.Children[RotationIndex], Quat.Get(), &Rotation, Error)
+					|| !ToProperty(Value.Children[TranslationIndex], Vector.Get(), &Translation, Error)
+					|| !ToProperty(Value.Children[ScaleIndex], Vector.Get(), &Scale, Error)) return false;
+				*static_cast<FTransform*>(Data) = FTransform(Rotation, Translation, Scale);
+				return true;
+			}
 			int32 Count = 0;
 			for (TFieldIterator<FProperty> It(Struct->Struct); It; ++It)
 			{

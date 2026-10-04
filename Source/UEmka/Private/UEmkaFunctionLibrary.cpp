@@ -2,6 +2,9 @@
 
 #include "UEmkaFunctionLibrary.h"
 #include "UEmkaComposite.h"
+#include "UEmkaNativeTypes.h"
+#include "UEmkaHostFunctionsInternal.h"
+#include "UObject/ObjectKey.h"
 #include "UObject/Stack.h"
 #include "UObject/UnrealType.h"
 #include "umka_api.h"
@@ -151,6 +154,19 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 		if (Value.bIsTuple)
 		{
 			Value.TypeName = TEXT("(") + FString::Join(FieldTypeNames, TEXT(", ")) + TEXT(")");
+		}
+		else if (VM)
+		{
+			static constexpr const char* NativeNames[] = {"Vector", "Rotator", "LinearColor", "Quat", "Transform"};
+			for (const char* Name : NativeNames)
+			{
+				const FString NativeName = UTF8_TO_TCHAR(Name);
+				if (umkaTypeSameDeclaration(VM, Type, "ue.um", Name) && UEmkaNativeTypes::IsValidLayout(Value, NativeName))
+				{
+					Value.NativeStructName = NativeName;
+					break;
+				}
+			}
 		}
 	}
 	return Value;
@@ -419,6 +435,21 @@ static bool LogUmkaFailure(const UObject* Caller, const FString& FunctionName, c
 {
 	UE_LOG(LogUEmka, Error, TEXT("[%s] %s: %s"), *GetPathNameSafe(Caller), *FunctionName, *Error);
 	return false;
+}
+
+static FString FormatRuntimeError(Umka* VM)
+{
+	FString Error = FormatUmkaError(VM, TEXT("Umka runtime error"));
+	for (int32 Depth = 0; Depth < 32; ++Depth)
+	{
+		char FileName[512] = {};
+		char FunctionName[512] = {};
+		int Offset = 0;
+		int Line = 0;
+		if (!umkaGetCallStack(VM, Depth, UE_ARRAY_COUNT(FileName), &Offset, FileName, FunctionName, &Line)) break;
+		Error += FString::Printf(TEXT("\n  at %s (%s:%d)"), UTF8_TO_TCHAR(FunctionName), UTF8_TO_TCHAR(FileName), Line);
+	}
+	return Error;
 }
 
 // ResultTypes string (RunUmkaInlineMulti) encodes EUEmkaValueType by ordinal value.
@@ -733,8 +764,7 @@ struct FUmkaStdoutCapture
 };
 #endif
 
-// Owns an Umka VM for one inline execution: allocates, compiles the script, and resolves the target function.
-// Frees the VM on destruction. Check IsValid() / Error after construction.
+// Host callback leases outlive VM cleanup, including when a session retains the compiled VM.
 struct FUmkaScopedVM
 {
 	Umka* VM = nullptr;
@@ -742,9 +772,11 @@ struct FUmkaScopedVM
 	const UmkaType* FunctionType = nullptr;
 	FString Error;
 	int32 ErrorLine = -1;
+	UEmkaHostFunctions::FSnapshot HostSnapshot;
 
 	FUmkaScopedVM(const FString& Script, const FString& FunctionName, const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true, const bool bResolveFunction = true)
 	{
+		UEmkaHostFunctions::AcquireSnapshot(HostSnapshot);
 		if (bResolveFunction && FunctionName.IsEmpty())
 		{
 			Error = TEXT("No function name provided");
@@ -770,6 +802,28 @@ struct FUmkaScopedVM
 			return;
 		}
 		umkaSetFileImportsEnabled(VM, bAllowFileImports);
+		const FString NativeSource = UEmkaNativeTypes::GetModuleSource();
+		if (!umkaAddModule(VM, "ue.um", TCHAR_TO_UTF8(*NativeSource)))
+		{
+			Error = FormatUmkaError(VM, TEXT("Could not register ue.um"));
+			return;
+		}
+		for (const FUEmkaModuleSource& Module : HostSnapshot.Modules)
+		{
+			if (!umkaAddModule(VM, TCHAR_TO_UTF8(*Module.FileName), TCHAR_TO_UTF8(*Module.Source)))
+			{
+				Error = FormatUmkaError(VM, TEXT("Could not register host module"));
+				return;
+			}
+		}
+		for (const UEmkaHostFunctions::FFunction& Function : HostSnapshot.Functions)
+		{
+			if (!umkaAddFunc(VM, TCHAR_TO_UTF8(*Function.Name), Function.Callback))
+			{
+				Error = FString::Printf(TEXT("Could not register host function '%s'"), *Function.Name);
+				return;
+			}
+		}
 		for (const FUEmkaModuleSource& Module : Modules)
 		{
 			if (!umkaAddModule(VM, TCHAR_TO_UTF8(*Module.FileName), TCHAR_TO_UTF8(*Module.Source)))
@@ -803,6 +857,7 @@ struct FUmkaScopedVM
 		{
 			umkaFree(VM);
 		}
+		UEmkaHostFunctions::ReleaseSnapshot();
 	}
 
 	FUmkaScopedVM(const FUmkaScopedVM&) = delete;
@@ -820,19 +875,243 @@ struct FUmkaScopedVM
 			ReleaseUmkaResult(VM, umkaGetParamType(Context.params, Index), umkaGetParam(Context.params, Index));
 		}
 	}
+
+	void ClearContext() const
+	{
+		for (int32 Index = 0; Index < umkaGetFuncParamCount(FunctionType); ++Index)
+		{
+			FMemory::Memzero(umkaGetParam(Context.params, Index), umkaGetTypeSize(umkaGetParamType(Context.params, Index)));
+		}
+		if (Context.result) *Context.result = {};
+	}
 };
 
-static bool RunUmkaScript(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
+struct FUmkaSessionKey
+{
+	FObjectKey Caller;
+	FGuid Id;
+	bool operator==(const FUmkaSessionKey& Other) const { return Caller == Other.Caller && Id == Other.Id; }
+	friend uint32 GetTypeHash(const FUmkaSessionKey& Key) { return HashCombine(GetTypeHash(Key.Caller), GetTypeHash(Key.Id)); }
+};
+
+struct FUmkaSession
+{
+	TWeakObjectPtr<UObject> Caller;
+	TUniquePtr<FUmkaScopedVM> Vm;
+	FString Script;
+	FString FunctionName;
+	FString FileName;
+	TArray<FUEmkaModuleSource> Modules;
+	bool bAllowFileImports = false;
+	bool bBusy = false;
+	bool bResetRequested = false;
+	TAtomic<bool> bCancelled{false};
+
+	bool Matches(const FString& NewScript, const FString& NewFunction, const FString& NewFileName, const TArray<FUEmkaModuleSource>& NewModules, bool bNewFileImports) const
+	{
+		if (!Vm || !umkaAlive(Vm->VM) || !Script.Equals(NewScript, ESearchCase::CaseSensitive)
+			|| !FunctionName.Equals(NewFunction, ESearchCase::CaseSensitive) || !FileName.Equals(NewFileName, ESearchCase::CaseSensitive)
+			|| bAllowFileImports != bNewFileImports || Modules.Num() != NewModules.Num()) return false;
+		for (int32 Index = 0; Index < Modules.Num(); ++Index)
+		{
+			if (!Modules[Index].FileName.Equals(NewModules[Index].FileName, ESearchCase::CaseSensitive)
+				|| !Modules[Index].Source.Equals(NewModules[Index].Source, ESearchCase::CaseSensitive)) return false;
+		}
+		return true;
+	}
+};
+
+static FCriticalSection GUmkaSessionMutex;
+static TMap<FUmkaSessionKey, TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> GUmkaSessions;
+
+namespace UEmkaRuntime
+{
+	void ResetIdleSessions()
+	{
+		TArray<TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> Removed;
+		{
+			FScopeLock Lock(&GUmkaSessionMutex);
+			for (auto It = GUmkaSessions.CreateIterator(); It; ++It)
+			{
+				if (!It.Value()->bBusy)
+				{
+					Removed.Add(It.Value());
+					It.RemoveCurrent();
+				}
+			}
+		}
+	}
+
+	void ResetAllSessions()
+	{
+		TArray<TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> Removed;
+		{
+			FScopeLock Lock(&GUmkaSessionMutex);
+			for (auto It = GUmkaSessions.CreateIterator(); It; ++It)
+			{
+				if (It.Value()->bBusy)
+				{
+					It.Value()->bResetRequested = true;
+					It.Value()->bCancelled.Store(true);
+				}
+				else
+				{
+					Removed.Add(It.Value());
+					It.RemoveCurrent();
+				}
+			}
+		}
+	}
+}
+
+// Owns an active call independently of the cache, including when another thread resets it.
+struct FUmkaExecution
+{
+	TSharedPtr<FUmkaSession, ESPMode::ThreadSafe> Session;
+	FUmkaSessionKey Key;
+	bool bTracked = false;
+	bool bRetain = false;
+	FString Error;
+
+	FUmkaExecution(UObject* Caller, const FGuid& Id, const FUEmkaExecutionOptions& Options, const FString& Script, const FString& FunctionName, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, bool bAllowFileImports)
+	{
+		if (Options.MaxInstructions < 0)
+		{
+			Error = TEXT("Instruction budget cannot be negative");
+			return;
+		}
+		bRetain = Options.bUseSession;
+		bTracked = Caller && Id.IsValid();
+		if (bRetain && !bTracked)
+		{
+			Error = TEXT("Runtime sessions require a caller and a valid session ID");
+			return;
+		}
+		// Cached VMs only import source supplied by assets, builtin modules, or the host registry.
+		bAllowFileImports &= !bRetain;
+		TArray<TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> Removed;
+		{
+			FScopeLock Lock(&GUmkaSessionMutex);
+			for (auto It = GUmkaSessions.CreateIterator(); It; ++It)
+			{
+				if (!It.Value()->Caller.IsValid() && !It.Value()->bBusy)
+				{
+					Removed.Add(It.Value());
+					It.RemoveCurrent();
+				}
+			}
+			if (bTracked)
+			{
+				Key = {FObjectKey(Caller), Id};
+				Session = GUmkaSessions.FindRef(Key);
+				if (Session && Session->bBusy)
+				{
+					Session.Reset();
+					Error = TEXT("This Umka session is already executing");
+					return;
+				}
+			}
+			if (!Session)
+			{
+				Session = MakeShared<FUmkaSession, ESPMode::ThreadSafe>();
+				Session->Caller = Caller;
+				if (bTracked) GUmkaSessions.Add(Key, Session);
+			}
+			Session->bBusy = true;
+			Session->bCancelled.Store(false);
+		}
+		if (!bRetain || !Session->Matches(Script, FunctionName, FileName, Modules, bAllowFileImports))
+		{
+			Session->Vm.Reset();
+			Session->Vm = MakeUnique<FUmkaScopedVM>(Script, FunctionName, Modules, FileName, bAllowFileImports);
+			Session->Script = Script;
+			Session->FunctionName = FunctionName;
+			Session->FileName = FileName;
+			Session->Modules = Modules;
+			Session->bAllowFileImports = bAllowFileImports;
+		}
+		if (!Session->Vm->IsValid())
+		{
+			Error = Session->Vm->Error;
+			return;
+		}
+		const UmkaCancelCallback Callback = bTracked ? +[](void* Data) { return static_cast<FUmkaSession*>(Data)->bCancelled.Load(); } : nullptr;
+		umkaSetExecutionBudget(Session->Vm->VM, static_cast<uint64>(Options.MaxInstructions), Callback, Session.Get());
+	}
+
+	~FUmkaExecution()
+	{
+		if (!Session) return;
+		if (Session->Vm && Session->Vm->IsValid())
+		{
+			Session->Vm->ClearContext();
+			umkaSetExecutionBudget(Session->Vm->VM, 0, nullptr, nullptr);
+		}
+		if (!bRetain || !Session->Vm || !Session->Vm->IsValid() || !umkaAlive(Session->Vm->VM)) Session->Vm.Reset();
+		FScopeLock Lock(&GUmkaSessionMutex);
+		Session->bBusy = false;
+		if (bTracked && (!Session->Vm || Session->bResetRequested) && GUmkaSessions.FindRef(Key) == Session) GUmkaSessions.Remove(Key);
+	}
+
+	bool IsValid() const { return Error.IsEmpty() && Session && Session->Vm && Session->Vm->IsValid(); }
+	FUmkaScopedVM& GetVm() const { return *Session->Vm; }
+};
+
+bool UUEmkaFunctionLibrary::ResetRuntimeSession(UObject* Caller, const FGuid& SessionId)
+{
+	TSharedPtr<FUmkaSession, ESPMode::ThreadSafe> Removed;
+	{
+		FScopeLock Lock(&GUmkaSessionMutex);
+		const FUmkaSessionKey Key{FObjectKey(Caller), SessionId};
+		Removed = GUmkaSessions.FindRef(Key);
+		if (!Removed || Removed->bBusy) return false;
+		GUmkaSessions.Remove(Key);
+	}
+	return true;
+}
+
+bool UUEmkaFunctionLibrary::CancelExecution(UObject* Caller, const FGuid& SessionId)
+{
+	FScopeLock Lock(&GUmkaSessionMutex);
+	const TSharedPtr<FUmkaSession, ESPMode::ThreadSafe> Session = GUmkaSessions.FindRef({FObjectKey(Caller), SessionId});
+	if (!Session || !Session->bBusy) return false;
+	Session->bCancelled.Store(true);
+	return true;
+}
+
+void UUEmkaFunctionLibrary::ResetAllRuntimeSessions()
+{
+	UEmkaRuntime::ResetAllSessions();
+}
+
+void UUEmkaFunctionLibrary::CleanupInvalidRuntimeSessions()
+{
+	TArray<TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> Removed;
+	{
+		FScopeLock Lock(&GUmkaSessionMutex);
+		for (auto It = GUmkaSessions.CreateIterator(); It; ++It)
+		{
+			if (!It.Value()->Caller.IsValid() && !It.Value()->bBusy)
+			{
+				Removed.Add(It.Value());
+				It.RemoveCurrent();
+			}
+		}
+	}
+}
+
+static bool RunUmkaScript(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports, const FGuid& SessionId = {}, const FUEmkaExecutionOptions& Options = {})
 {
 	Result = FUEmkaScriptParam{};
 	Error.Reset();
 
-	FUmkaScopedVM Vm(Script, FunctionName, Modules, FileName, bAllowFileImports);
-	if (!Vm.IsValid())
+	FUmkaExecution Execution(Caller, SessionId, Options, Script, FunctionName, Modules, FileName, bAllowFileImports);
+	if (!Execution.IsValid())
 	{
-		Error = Vm.Error;
+		Error = Execution.Error;
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
+	FUmkaScopedVM& Vm = Execution.GetVm();
 	bool bParamsTransferred = false;
 	ON_SCOPE_EXIT
 	{
@@ -977,7 +1256,7 @@ static bool RunUmkaScript(UObject* Caller, const FString& Script, const FString&
 	}
 	else if (!bSuccess)
 	{
-		Error = FormatUmkaError(Vm.VM, TEXT("Umka runtime error"));
+		Error = FormatRuntimeError(Vm.VM);
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
 
@@ -988,7 +1267,7 @@ static bool RunUmkaScript(UObject* Caller, const FString& Script, const FString&
 // Multi-return helpers (shared with RunUmkaInlineMulti)
 // -------------------------------------------------------------------------
 
-static bool RunUmkaScriptMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
+static bool RunUmkaScriptMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports, const FGuid& SessionId = {}, const FUEmkaExecutionOptions& Options = {})
 {
 	Results.Reset();
 	Error.Reset();
@@ -1021,12 +1300,13 @@ static bool RunUmkaScriptMulti(UObject* Caller, const FString& Script, const FSt
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
 
-	FUmkaScopedVM Vm(Script, FunctionName, Modules, FileName, bAllowFileImports);
-	if (!Vm.IsValid())
+	FUmkaExecution Execution(Caller, SessionId, Options, Script, FunctionName, Modules, FileName, bAllowFileImports);
+	if (!Execution.IsValid())
 	{
-		Error = Vm.Error;
+		Error = Execution.Error;
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
+	FUmkaScopedVM& Vm = Execution.GetVm();
 	bool bParamsTransferred = false;
 	ON_SCOPE_EXIT
 	{
@@ -1167,11 +1447,41 @@ static bool RunUmkaScriptMulti(UObject* Caller, const FString& Script, const FSt
 	}
 	else
 	{
-		Error = FormatUmkaError(Vm.VM, TEXT("Umka runtime error"));
+		Error = FormatRuntimeError(Vm.VM);
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
 
 	return bSuccess;
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaInlineConfigured(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options)
+{
+	return RunUmkaScript(Caller, Script, FunctionName, Params, ResultType, bResultIsArray, bResultIsStaticArray, Result, Error, {}, TEXT("script.um"), true, SessionId, Options);
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaInlineMultiConfigured(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options)
+{
+	return RunUmkaScriptMulti(Caller, Script, FunctionName, Params, ResultTypes, Results, Error, {}, TEXT("script.um"), true, SessionId, Options);
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaAssetConfigured(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options)
+{
+	Result = {};
+	FString Source;
+	FString FileName;
+	TArray<FUEmkaModuleSource> Modules;
+	if (!UUEmkaScriptAsset::ResolveAsset(Asset, Source, FileName, Modules, Error)) return LogUmkaFailure(Caller, FunctionName, Error);
+	return RunUmkaScript(Caller, Script, FunctionName, Params, ResultType, bResultIsArray, bResultIsStaticArray, Result, Error, Modules, FileName, false, SessionId, Options);
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaAssetMultiConfigured(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const FGuid& SessionId, const FUEmkaExecutionOptions& Options)
+{
+	Results.Reset();
+	FString Source;
+	FString FileName;
+	TArray<FUEmkaModuleSource> Modules;
+	if (!UUEmkaScriptAsset::ResolveAsset(Asset, Source, FileName, Modules, Error)) return LogUmkaFailure(Caller, FunctionName, Error);
+	return RunUmkaScriptMulti(Caller, Script, FunctionName, Params, ResultTypes, Results, Error, Modules, FileName, false, SessionId, Options);
 }
 
 bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error)

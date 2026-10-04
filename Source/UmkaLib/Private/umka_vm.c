@@ -4091,6 +4091,16 @@ static void vmLoop(VM *vm)
 
     while (1)
     {
+        if (UNLIKELY(vm->maxInstructions != 0))
+        {
+            if (UNLIKELY(vm->instructionsRemaining == 0))
+                error->runtimeHandler(error->context, ERR_RUNTIME, "Instruction budget exceeded");
+            vm->instructionsRemaining--;
+        }
+
+        if (UNLIKELY(vm->cancelCallback != NULL) && (vm->cancelPoll++ & 1023) == 0 && vm->cancelCallback(vm->cancelUserData))
+            error->runtimeHandler(error->context, ERR_RUNTIME, "Execution cancelled");
+
         if (UNLIKELY(fiber->top - fiber->stack < MEM_MIN_FREE_STACK))
             error->runtimeHandler(error->context, ERR_RUNTIME, "Stack overflow");
 

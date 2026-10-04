@@ -10,6 +10,7 @@
 #include "Misc/StringOutputDevice.h"
 #include "StructUtils/UserDefinedStruct.h"
 #include "UEmkaFunctionLibrary.h"
+#include "UEmkaNativeTypes.h"
 #include "UObject/Package.h"
 #include "UObject/StructOnScope.h"
 #include "UObject/StrongObjectPtr.h"
@@ -111,6 +112,7 @@ bool AppendShape(const FUEmkaCompiledValue& Value, FString& Shape, FString& OutE
 		return false;
 	}
 	Shape += FString::Printf(TEXT("%d:%d:%d:%d["), static_cast<int32>(Value.Type), Value.bIsArray, Value.bIsMap, Value.bIsStruct);
+	Shape += FString::Printf(TEXT("%d:%s:"), Value.NativeStructName.Len(), *Value.NativeStructName);
 	for (const FUEmkaCompiledValue& Field : Value.Fields)
 	{
 		Shape += FString::Printf(TEXT("%d:%s="), Field.Name.Len(), *Field.Name);
@@ -174,6 +176,19 @@ FEdGraphPinType ResolvePinType(const FUEmkaCompiledValue& Value, UObject* Owner,
 	{
 		FEdGraphPinType PinType = ScalarPinType(Value.Type);
 		if (PinType.PinCategory.IsNone()) OutError = FString::Printf(TEXT("Unsupported Umka scalar type '%s'"), *Value.TypeName);
+		return PinType;
+	}
+	if (!Value.NativeStructName.IsEmpty())
+	{
+		UScriptStruct* Struct = UEmkaNativeTypes::GetNativeStruct(Value.NativeStructName);
+		if (!Struct || !UEmkaNativeTypes::IsValidLayout(Value, Value.NativeStructName))
+		{
+			OutError = FString::Printf(TEXT("Invalid native Unreal layout '%s'"), *Value.NativeStructName);
+			return {};
+		}
+		FEdGraphPinType PinType;
+		PinType.PinCategory = UEdGraphSchema_K2::PC_Struct;
+		PinType.PinSubCategoryObject = Struct;
 		return PinType;
 	}
 	if (!Owner || Value.Fields.IsEmpty())

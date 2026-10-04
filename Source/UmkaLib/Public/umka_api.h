@@ -119,6 +119,7 @@ typedef struct
 
 
 typedef void (*UmkaWarningCallback)(UmkaError *warning);
+typedef bool (*UmkaCancelCallback)(void *userData);
 
 
 typedef Umka *(*UmkaAlloc)                      (void);
@@ -184,6 +185,9 @@ typedef bool (*UmkaMapVisitor)                 (UmkaStackSlot key, const void *v
 typedef bool (*UmkaVisitMap)                   (const UmkaMap *map, UmkaMapVisitor visitor, void *user);
 typedef void (*UmkaSetFileImportsEnabled)      (Umka *umka, bool enabled);
 typedef const char *(*UmkaGetTypeNameInMainModule)(Umka *umka, const UmkaType *type);
+typedef void (*UmkaSetExecutionBudget)          (Umka *umka, uint64_t maxInstructions, UmkaCancelCallback callback, void *userData);
+typedef const char *(*UmkaGetTypeModulePath)    (Umka *umka, const UmkaType *type);
+typedef bool (*UmkaTypeSameDeclaration)        (Umka *umka, const UmkaType *type, const char *modulePath, const char *typeName);
 
 
 typedef struct
@@ -250,6 +254,9 @@ typedef struct
     UmkaVisitMap        umkaVisitMap;
     UmkaSetFileImportsEnabled umkaSetFileImportsEnabled;
     UmkaGetTypeNameInMainModule umkaGetTypeNameInMainModule;
+    UmkaSetExecutionBudget umkaSetExecutionBudget;
+    UmkaGetTypeModulePath umkaGetTypeModulePath;
+    UmkaTypeSameDeclaration umkaTypeSameDeclaration;
 } UmkaAPI;
 
 
@@ -258,6 +265,9 @@ UMKA_API bool umkaInit                      (Umka *umka, const char *fileName, c
 UMKA_API bool umkaCompile                   (Umka *umka);
 UMKA_API int  umkaRun                       (Umka *umka);
 UMKA_API int  umkaCall                      (Umka *umka, UmkaFuncContext *fn);
+UMKA_API void umkaSetExecutionBudget        (Umka *umka, uint64_t maxInstructions, UmkaCancelCallback callback, void *userData);
+UMKA_API const char *umkaGetTypeModulePath  (Umka *umka, const UmkaType *type);
+UMKA_API bool umkaTypeSameDeclaration       (Umka *umka, const UmkaType *type, const char *modulePath, const char *typeName);
 UMKA_API void umkaFree                      (Umka *umka);
 UMKA_API UmkaError *umkaGetError            (Umka *umka);
 UMKA_API bool umkaAlive                     (Umka *umka);

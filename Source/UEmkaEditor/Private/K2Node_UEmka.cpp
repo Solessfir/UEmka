@@ -12,11 +12,14 @@
 #include "Internationalization/Regex.h"
 #include "UEmkaFunctionLibrary.h"
 #include "UEmkaRecordTypes.h"
+#include "UObject/PropertyPortFlags.h"
 #include UE_INLINE_GENERATED_CPP_BY_NAME(K2Node_UEmka)
 
 #define LOCTEXT_NAMESPACE "K2Node_UEmka"
 
 static const FName PIN_ReturnValue(TEXT("ReturnValue"));
+static const FName PIN_Success(TEXT("Success"));
+static const FName PIN_Error(TEXT("Error"));
 
 // -------------------------------------------------------------------------
 // Static helpers
@@ -456,7 +459,7 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 	TFunction<FString(const FUEmkaCompiledValue&, const FString&, const FString&)> FlattenInput;
 	FlattenInput = [&Sig, &FlattenInput, bNativeStructPins](const FUEmkaCompiledValue& Value, const FString& Name, const FString& FriendlyName)
 	{
-		if (Value.bIsStruct && !bNativeStructPins)
+		if (Value.bIsStruct && !bNativeStructPins && Value.NativeStructName.IsEmpty())
 		{
 			Sig.bNeedsShim = true;
 			TArray<FString> Initializers;
@@ -495,7 +498,7 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 		TFunction<void(const FUEmkaCompiledValue&, const FString&, const FString&, const FString&)> FlattenResult;
 		FlattenResult = [&Sig, &ReturnExpressions, &ReturnTypes, &FlattenResult, bNativeStructPins](const FUEmkaCompiledValue& Value, const FString& Name, const FString& Friendly, const FString& Expression)
 		{
-			if (Value.bIsStruct && !bNativeStructPins)
+			if (Value.bIsStruct && !bNativeStructPins && Value.NativeStructName.IsEmpty())
 			{
 				Sig.bNeedsShim = true;
 				for (const FUEmkaCompiledValue& Field : Value.Fields)
@@ -1198,6 +1201,11 @@ void UK2Node_UEmka::AllocateDefaultPins()
 	// Exec in/out
 	CreatePin(EGPD_Input,  UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Execute);
 	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Then);
+	if (bExposeRuntimeStatus)
+	{
+		CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Boolean, GetRuntimeStatusPinName(PIN_Success));
+		CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_String, GetRuntimeStatusPinName(PIN_Error));
+	}
 	TArray<FEdGraphPinType> InputTypes;
 	TArray<FEdGraphPinType> OutputTypes;
 	TArray<FString> InputDefaults;
@@ -1291,6 +1299,27 @@ void UK2Node_UEmka::AllocateDefaultPins()
 	Super::AllocateDefaultPins();
 }
 
+FName UK2Node_UEmka::GetRuntimeStatusPinName(const FName Name) const
+{
+	TSet<FName> ReturnNames = {UEdGraphSchema_K2::PN_Then, PIN_ReturnValue};
+	for (int32 Index = 0; Index < ParsedSignature.ReturnParams.Num(); ++Index)
+	{
+		const FUEmkaPinDef& Result = ParsedSignature.ReturnParams[Index];
+		ReturnNames.Add(FName(*Result.Name));
+		ReturnNames.Add(FName(*Result.FriendlyName));
+		ReturnNames.Add(FName(*FString::Printf(TEXT("ReturnValue%d"), Index + 1)));
+	}
+	if (!ParsedSignature.ReturnEnumTypeName.IsEmpty()) ReturnNames.Add(FName(*ParsedSignature.ReturnEnumTypeName));
+	if (!ReturnNames.Contains(Name)) return Name;
+	const FString Base = TEXT("Runtime") + Name.ToString();
+	FName Candidate(*Base);
+	for (int32 Index = 1; ReturnNames.Contains(Candidate); ++Index)
+	{
+		Candidate = FName(*(Base + FString::FromInt(Index)));
+	}
+	return Candidate;
+}
+
 FText UK2Node_UEmka::GetNodeTitle(ENodeTitleType::Type TitleType) const
 {
 	if (TitleType == ENodeTitleType::MenuTitle)
@@ -1344,6 +1373,10 @@ void UK2Node_UEmka::GetMenuActions(FBlueprintActionDatabaseRegistrar& ActionRegi
 void UK2Node_UEmka::ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLog) const
 {
 	Super::ValidateNodeDuringCompilation(MessageLog);
+	if (ExecutionOptions.MaxInstructions < 0)
+	{
+		MessageLog.Error(*LOCTEXT("InvalidInstructionLimit", "UEmka node: Max Instructions must be zero or greater @@").ToString(), this);
+	}
 
 	if (GetScriptSource().IsEmpty() && !ScriptAsset)
 	{
@@ -1431,7 +1464,9 @@ void UK2Node_UEmka::PostEditChangeProperty(FPropertyChangedEvent& PropertyChange
 	const FName Name = PropertyChangedEvent.GetMemberPropertyName();
 	if (Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, ScriptAsset)
 		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, SelectedFunction)
-		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, bNativeStructPins)) RefreshScript();
+		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, bNativeStructPins)
+		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, ExecutionOptions)
+		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, bExposeRuntimeStatus)) RefreshScript();
 }
 
 void UK2Node_UEmka::OnScriptAssetChanged(UUEmkaScriptAsset* ChangedAsset)
@@ -1466,7 +1501,7 @@ void UK2Node_UEmka::RefreshScript()
 		LastErrorMessage.Empty();
 	}
 
-	if (NewSig != ParsedSignature)
+	if (NewSig != ParsedSignature || bExposeRuntimeStatus != (FindPin(GetRuntimeStatusPinName(PIN_Success), EGPD_Output) != nullptr))
 	{
 		ParsedSignature = NewSig;
 		ReconstructNode();
@@ -1627,15 +1662,27 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 	UK2Node_CallFunction* CallNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
 	if (bMultiReturn)
 	{
-		CallNode->FunctionReference.SetExternalMember(ScriptAsset ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaAssetMulti)
-			: GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInlineMulti), UUEmkaFunctionLibrary::StaticClass());
+		CallNode->FunctionReference.SetExternalMember(ScriptAsset ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaAssetMultiConfigured)
+			: GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInlineMultiConfigured), UUEmkaFunctionLibrary::StaticClass());
 	}
 	else
 	{
-		CallNode->FunctionReference.SetExternalMember(ScriptAsset ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaAsset)
-			: GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInline), UUEmkaFunctionLibrary::StaticClass());
+		CallNode->FunctionReference.SetExternalMember(ScriptAsset ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaAssetConfigured)
+			: GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInlineConfigured), UUEmkaFunctionLibrary::StaticClass());
 	}
 	CallNode->AllocateDefaultPins();
+
+	FString SessionIdText;
+	NodeGuid.ExportTextItem(SessionIdText, FGuid(), this, PPF_None, nullptr);
+	CallNode->FindPinChecked(TEXT("SessionId"), EGPD_Input)->DefaultValue = SessionIdText;
+	FString OptionsText;
+	FUEmkaExecutionOptions::StaticStruct()->ExportText(OptionsText, &ExecutionOptions, nullptr, this, PPF_None, nullptr);
+	CallNode->FindPinChecked(TEXT("Options"), EGPD_Input)->DefaultValue = OptionsText;
+	if (bExposeRuntimeStatus)
+	{
+		CompilerContext.MovePinLinksToIntermediate(*FindPinChecked(GetRuntimeStatusPinName(PIN_Success), EGPD_Output), *CallNode->FindPinChecked(PIN_ReturnValue, EGPD_Output));
+		CompilerContext.MovePinLinksToIntermediate(*FindPinChecked(GetRuntimeStatusPinName(PIN_Error), EGPD_Output), *CallNode->FindPinChecked(TEXT("Error"), EGPD_Output));
+	}
 
 	// Wire exec in -> runner
 	CompilerContext.MovePinLinksToIntermediate(*GetExecPin(), *CallNode->GetExecPin());

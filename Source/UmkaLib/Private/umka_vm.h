@@ -203,6 +203,10 @@ typedef struct tagVM
     UmkaHookFunc hooks[UMKA_NUM_HOOKS];
     bool terminatedNormally;
     int callNesting;
+    uint64_t maxInstructions, instructionsRemaining;
+    UmkaCancelCallback cancelCallback;
+    void *cancelUserData;
+    unsigned int cancelPoll;
     Storage *storage;
     Error *error;
 } VM;
