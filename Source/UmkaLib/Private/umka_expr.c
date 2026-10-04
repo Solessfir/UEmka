@@ -12,7 +12,7 @@
 #include "umka_stmt.h"
 
 
-void doPushConst(Umka *umka, const Type *type, const Const *constant)
+static void doPushConst(Umka *umka, const Type *type, const Const *constant)
 {
     if (type->kind == TYPE_UINT)
         genPushUIntConst(&umka->gen, constant->uintVal);
@@ -38,7 +38,7 @@ void doPushVarPtr(Umka *umka, const Ident *ident)
 }
 
 
-void doCopyResultToTempVar(Umka *umka, const Type *type)
+static void doCopyResultToTempVar(Umka *umka, const Type *type)
 {
     const Ident *resultCopy = identAllocTempVar(&umka->idents, &umka->types, &umka->modules, &umka->blocks, type, true);
     genCopyResultToTempVar(&umka->gen, type, resultCopy->offset);
@@ -965,7 +965,7 @@ static void parseBuiltinNewCall(Umka *umka, const Type **type, Const *constant)
         umka->error.handler(umka->error.context, "Function is not allowed in constant expressions");
 
     // Type
-    *type = parseType(umka, NULL);
+    *type = parseType(umka);
     typeAssertCompatibleBuiltin(&umka->types, *type, BUILTIN_NEW, (*type)->kind != TYPE_VOID && (*type)->kind != TYPE_NULL);
 
     genCallTypedBuiltin(&umka->gen, *type, BUILTIN_NEW);
@@ -995,7 +995,7 @@ static void parseBuiltinMakeCall(Umka *umka, const Type **type, Const *constant)
     if (constant)
         umka->error.handler(umka->error.context, "Function is not allowed in constant expressions");
 
-    *type = parseType(umka, NULL);
+    *type = parseType(umka);
     typeAssertCompatibleBuiltin(&umka->types, *type, BUILTIN_MAKE, (*type)->kind == TYPE_DYNARRAY || (*type)->kind == TYPE_MAP || (*type)->kind == TYPE_FIBER);
 
     if ((*type)->kind == TYPE_DYNARRAY)
@@ -1494,7 +1494,7 @@ static void parseBuiltinSelfTypeEqCall(Umka *umka, const Type **type, Const *con
 // fn typeptr(T): ^void
 static void parseBuiltinTypePtrCall(Umka *umka, const Type **type, Const *constant)
 {
-    *type = parseType(umka, NULL);
+    *type = parseType(umka);
     typeAssertCompatibleBuiltin(&umka->types, *type, BUILTIN_TYPEPTR, (*type)->kind != TYPE_VOID && (*type)->kind != TYPE_NULL);
 
     if (constant)
@@ -1994,9 +1994,12 @@ static void parseTypeCast(Umka *umka, const Type **type, Const *constant)
 }
 
 
+static void parseExprInPlace(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset);
+
+
 // arrayLiteral  = "{" [expr {"," expr} [","]] "}".
 // structLiteral = "{" [[ident ":"] expr {"," [ident ":"] expr} [","]] "}".
-static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *constant)
+static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
     lexEat(&umka->lex, TOK_LBRACE);
 
@@ -2019,7 +2022,7 @@ static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *cons
         fieldInitialized = storageAdd(&umka->storage, (*type)->numItems + 1);
 
     const int size = typeSize(&umka->types, *type);
-    const Ident *arrayOrStruct = NULL;
+    int resultOffset = 0;
 
     if (constant)
     {
@@ -2027,10 +2030,15 @@ static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *cons
         if (namedFields)
             constZero(constant->ptrVal, size);
     }
+    else if (inPlaceOffset && *inPlaceOffset)
+    {
+        resultOffset = **inPlaceOffset;
+    }
     else
     {
-        arrayOrStruct = identAllocTempVar(&umka->idents, &umka->types, &umka->modules, &umka->blocks, *type, false);
+        const Ident *arrayOrStruct = identAllocTempVar(&umka->idents, &umka->types, &umka->modules, &umka->blocks, *type, false);
         doZeroVar(umka, arrayOrStruct);
+        resultOffset = arrayOrStruct->offset;
     }
 
     int numItems = 0, itemOffset = 0;
@@ -2066,22 +2074,34 @@ static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *cons
             itemOffset = field->offset;
         }
 
+        const int itemTotalOffset = resultOffset + itemOffset;
+
         if (!constant)
-            genPushLocalPtr(&umka->gen, arrayOrStruct->offset + itemOffset);
+            genPushLocalPtr(&umka->gen, itemTotalOffset);
 
         const Type *expectedItemType = (*type)->kind == TYPE_ARRAY ? (*type)->base : field->type;
         const Type *itemType = expectedItemType;
         Const itemConstantBuf, *itemConstant = constant ? &itemConstantBuf : NULL;
         const int itemSize = typeSize(&umka->types, expectedItemType);
+        const int *itemInPlaceOffset = &itemTotalOffset;
 
         // expr
-        parseExpr(umka, &itemType, itemConstant);
+        parseExprInPlace(umka, &itemType, itemConstant, &itemInPlaceOffset);
         doAssertImplicitTypeConv(umka, expectedItemType, &itemType, itemConstant);
 
         if (constant)
+        {
             constAssign(&umka->consts, (char *)constant->ptrVal + itemOffset, itemConstant, expectedItemType->kind, itemSize);
+        }
+        else if (itemInPlaceOffset && *itemInPlaceOffset)
+        {
+            genPop(&umka->gen);         // Compiled in place - remove both LHS and RHS
+            genPop(&umka->gen);
+        }
         else
+        {
             doTryOptimizeRefCntAssign(umka, expectedItemType, false);
+        }
 
         numItems++;
         if ((*type)->kind == TYPE_ARRAY)
@@ -2096,7 +2116,7 @@ static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *cons
         umka->error.handler(umka->error.context, "Too few elements in literal");
 
     if (!constant)
-        doPushVarPtr(umka, arrayOrStruct);
+        genPushLocalPtr(&umka->gen, resultOffset);
 
     // Allow closing brace on a new line
     if (umka->lex.tok.kind == TOK_IMPLICIT_SEMICOLON)
@@ -2107,13 +2127,16 @@ static void parseArrayOrStructLiteral(Umka *umka, const Type **type, Const *cons
 
 
 // dynArrayLiteral = arrayLiteral.
-static void parseDynArrayLiteral(Umka *umka, const Type **type, Const *constant)
+static void parseDynArrayLiteral(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
     lexEat(&umka->lex, TOK_LBRACE);
 
     ConstArray constItems;
     if (constant)
         constArrayAlloc(&constItems, &umka->storage, (*type)->base);
+
+    if (inPlaceOffset)
+        *inPlaceOffset = NULL;
 
     // Dynamic array is first parsed as a static array of unknown length, then converted to a dynamic array
     Type *staticArrayType = typeAdd(&umka->types, &umka->blocks, TYPE_ARRAY);
@@ -2200,12 +2223,15 @@ static void parseDynArrayLiteral(Umka *umka, const Type **type, Const *constant)
 
 
 // mapLiteral = "{" [expr ":" expr {"," expr ":" expr} [","]] "}".
-static void parseMapLiteral(Umka *umka, const Type **type, Const *constant)
+static void parseMapLiteral(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
     lexEat(&umka->lex, TOK_LBRACE);
 
     if (constant)
         umka->error.handler(umka->error.context, "Map literals are not allowed for constants");
+
+    if (inPlaceOffset)
+        *inPlaceOffset = NULL;
 
     // Allocate map
     const Ident *mapIdent = identAllocTempVar(&umka->idents, &umka->types, &umka->modules, &umka->blocks, *type, false);
@@ -2251,7 +2277,7 @@ static void parseMapLiteral(Umka *umka, const Type **type, Const *constant)
 
 
 // closureLiteral = ["|" ident {"," ident} "|"] fnBlock.
-static void parseClosureLiteral(Umka *umka, const Type **type, Const *constant)
+static void parseClosureLiteral(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
     if (constant)
     {
@@ -2283,6 +2309,9 @@ static void parseClosureLiteral(Umka *umka, const Type **type, Const *constant)
     }
     else
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+        
         // Allocate closure
         const Ident *closureIdent = identAllocTempVar(&umka->idents, &umka->types, &umka->modules, &umka->blocks, *type, false);
         doZeroVar(umka, closureIdent);
@@ -2379,16 +2408,16 @@ static void parseClosureLiteral(Umka *umka, const Type **type, Const *constant)
 
 
 // compositeLiteral = [type] (arrayLiteral | dynArrayLiteral | mapLiteral | structLiteral | closureLiteral).
-static void parseCompositeLiteral(Umka *umka, const Type **type, Const *constant)
+static void parseCompositeLiteral(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
     if ((*type)->kind == TYPE_ARRAY || (*type)->kind == TYPE_STRUCT)
-        parseArrayOrStructLiteral(umka, type, constant);
+        parseArrayOrStructLiteral(umka, type, constant, inPlaceOffset);
     else if ((*type)->kind == TYPE_DYNARRAY)
-        parseDynArrayLiteral(umka, type, constant);
+        parseDynArrayLiteral(umka, type, constant, inPlaceOffset);
     else if ((*type)->kind == TYPE_MAP)
-        parseMapLiteral(umka, type, constant);
+        parseMapLiteral(umka, type, constant, inPlaceOffset);
     else if ((*type)->kind == TYPE_CLOSURE)
-        parseClosureLiteral(umka, type, constant);
+        parseClosureLiteral(umka, type, constant, inPlaceOffset);
     else
         umka->error.handler(umka->error.context, "Composite literals are only allowed for arrays, maps, structures and closures");
 }
@@ -2417,15 +2446,21 @@ static void parseEnumConst(Umka *umka, const Type **type, Const *constant)
 }
 
 
-static void parseTypeCastOrCompositeLiteralOrEnumConst(Umka *umka, const Ident *ident, const Type **type, Const *constant, bool *isVar, bool *isCall, bool *isCompLit)
+static void parseTypeCastOrCompositeLiteralOrEnumConst(Umka *umka, const Ident *ident, const Type **type, Const *constant, bool *isVar, bool *isCall, bool *isCompLit, const int **inPlaceOffset)
 {
+    const Type *inferredType = *type;
+
     if (*type && (umka->lex.tok.kind == TOK_LBRACE || umka->lex.tok.kind == TOK_OR || umka->lex.tok.kind == TOK_PERIOD))
     {
         // No type to parse - use the inferred type instead, i.e., the type specified as an initial value to the type parameter of parseExpr() or parseExprList()
     }
+    else if (ident)
+    {
+        *type = parseTypeIdent(umka, ident);
+    }
     else
     {
-        *type = parseType(umka, ident);
+        *type = parseType(umka);
     }
 
     if (umka->lex.tok.kind == TOK_LPAR)
@@ -2435,7 +2470,13 @@ static void parseTypeCastOrCompositeLiteralOrEnumConst(Umka *umka, const Ident *
     }
     else if (umka->lex.tok.kind == TOK_LBRACE || umka->lex.tok.kind == TOK_OR)
     {
-        parseCompositeLiteral(umka, type, constant);
+        if (inPlaceOffset && (!inferredType || !typeEquivalent(*type, inferredType)))
+        {
+            *inPlaceOffset = NULL;
+            inPlaceOffset = NULL;
+        }
+
+        parseCompositeLiteral(umka, type, constant, inPlaceOffset);
         *isCompLit = true;
     }
     else if (umka->lex.tok.kind == TOK_PERIOD)
@@ -2444,10 +2485,15 @@ static void parseTypeCastOrCompositeLiteralOrEnumConst(Umka *umka, const Ident *
         *isCompLit = false;
     }
     else
+    {
         umka->error.handler(umka->error.context, "Type cast or composite literal or enumeration constant expected");
+    }
 
     *isVar = typeStructured(*type);
     *isCall = false;
+
+    if (inPlaceOffset && !*isCompLit)
+        *inPlaceOffset = NULL;
 }
 
 
@@ -2687,7 +2733,7 @@ static void parseSelectors(Umka *umka, const Type **type, Const *constant, bool 
 
 
 // designator = (primary | typeCast | compositeLiteral | enumConst) selectors.
-static void parseDesignator(Umka *umka, const Type **type, Const *constant, bool *isVar, bool *isCall, bool *isCompLit)
+static void parseDesignator(Umka *umka, const Type **type, Const *constant, bool *isVar, bool *isCall, bool *isCompLit, const int **inPlaceOffset)
 {
     const Ident *ident = NULL;
     if (umka->lex.tok.kind == TOK_IDENT && (ident = parseQualIdent(umka)) && ident->kind != IDENT_TYPE)
@@ -2696,9 +2742,12 @@ static void parseDesignator(Umka *umka, const Type **type, Const *constant, bool
         *isCompLit = false;
     }
     else
-        parseTypeCastOrCompositeLiteralOrEnumConst(umka, ident, type, constant, isVar, isCall, isCompLit);
+        parseTypeCastOrCompositeLiteralOrEnumConst(umka, ident, type, constant, isVar, isCall, isCompLit, inPlaceOffset);
 
     parseSelectors(umka, type, constant, isVar, isCall, isCompLit);
+
+    if (inPlaceOffset && !*isCompLit)
+        *inPlaceOffset = NULL;
 
     if ((*type)->kind == TYPE_FN) 
     {
@@ -2725,7 +2774,7 @@ static void parseDesignator(Umka *umka, const Type **type, Const *constant, bool
 // designatorList = designator {"," designator}.
 void parseDesignatorList(Umka *umka, const Type **type, Const *constant, bool *isVar, bool *isCall, bool *isCompLit)
 {
-    parseDesignator(umka, type, constant, isVar, isCall, isCompLit);
+    parseDesignator(umka, type, constant, isVar, isCall, isCompLit, NULL);
 
     if (umka->lex.tok.kind == TOK_COMMA && (*isVar) && !(*isCall) && !(*isCompLit))
     {
@@ -2748,7 +2797,7 @@ void parseDesignatorList(Umka *umka, const Type **type, Const *constant, bool *i
             lexNext(&umka->lex);
 
             bool fieldIsVar, fieldIsCall, fieldIsCompLit;
-            parseDesignator(umka, &fieldType, NULL, &fieldIsVar, &fieldIsCall, &fieldIsCompLit);
+            parseDesignator(umka, &fieldType, NULL, &fieldIsVar, &fieldIsCall, &fieldIsCompLit, NULL);
 
             if (!fieldIsVar || fieldIsCall || fieldIsCompLit)
                 umka->error.handler(umka->error.context, "Inconsistent designator list");
@@ -2761,7 +2810,7 @@ void parseDesignatorList(Umka *umka, const Type **type, Const *constant, bool *i
 
 // factor = designator | intNumber | realNumber | charLiteral | stringLiteral |
 //          ("+" | "-" | "!" | "~" ) factor | "&" designator | "(" expr ")".
-static void parseFactor(Umka *umka, const Type **type, Const *constant)
+static void parseFactor(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
     switch (umka->lex.tok.kind)
     {
@@ -2780,7 +2829,7 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
         {
             // A designator that isVar is always an addressable quantity (a structured type or a pointer to a value type)
             bool isVar, isCall, isCompLit;
-            parseDesignator(umka, type, constant, &isVar, &isCall, &isCompLit);
+            parseDesignator(umka, type, constant, &isVar, &isCall, &isCompLit, inPlaceOffset);
             if (isVar)
             {
                 if (!typeStructured(*type))
@@ -2811,6 +2860,8 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
                 *type = umka->types.predecl.intType;
             }
             lexNext(&umka->lex);
+            if (inPlaceOffset)
+                *inPlaceOffset = NULL;            
             break;
         }
 
@@ -2822,6 +2873,8 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
                 genPushRealConst(&umka->gen, umka->lex.tok.realVal);
             lexNext(&umka->lex);
             *type = umka->types.predecl.realType;
+            if (inPlaceOffset)
+                *inPlaceOffset = NULL;
             break;
         }
 
@@ -2833,6 +2886,8 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
                 genPushIntConst(&umka->gen, umka->lex.tok.intVal);
             lexNext(&umka->lex);
             *type = umka->types.predecl.charType;
+            if (inPlaceOffset)
+                *inPlaceOffset = NULL;            
             break;
         }
 
@@ -2845,6 +2900,8 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
             lexNext(&umka->lex);
 
             *type = typeAdd(&umka->types, &umka->blocks, TYPE_STR);
+            if (inPlaceOffset)
+                *inPlaceOffset = NULL;
             break;
         }
 
@@ -2856,7 +2913,7 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
             TokenKind op = umka->lex.tok.kind;
             lexNext(&umka->lex);
 
-            parseFactor(umka, type, constant);
+            parseFactor(umka, type, constant, NULL);
             typeAssertValidOperator(&umka->types, *type, op);
 
             if (constant)
@@ -2867,6 +2924,8 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
             if (op == TOK_MINUS && typeInteger(*type) && !typeKindSigned((*type)->kind))
                 *type = umka->types.predecl.intType;
 
+            if (inPlaceOffset)
+                *inPlaceOffset = NULL;
             break;
         }
 
@@ -2878,7 +2937,7 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
             lexNext(&umka->lex);
 
             bool isVar, isCall, isCompLit;
-            parseDesignator(umka, type, constant, &isVar, &isCall, &isCompLit);
+            parseDesignator(umka, type, constant, &isVar, &isCall, &isCompLit, NULL);
 
             if (!isVar)
                 umka->error.handler(umka->error.context, "Cannot take address");
@@ -2896,6 +2955,8 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
                 genResetOptimizer(&umka->gen);      // No instructions emitted, but the type has changed - a barrier for optimizations
             }
 
+            if (inPlaceOffset)
+                *inPlaceOffset = NULL;
             break;
         }
 
@@ -2903,8 +2964,7 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
         {
             lexEat(&umka->lex, TOK_LPAR);
 
-            *type = NULL;
-            parseExpr(umka, type, constant);
+            parseExprInPlace(umka, type, constant, inPlaceOffset);
 
             lexEat(&umka->lex, TOK_RPAR);
             break;
@@ -2916,13 +2976,16 @@ static void parseFactor(Umka *umka, const Type **type, Const *constant)
 
 
 // term = factor {("*" | "/" | "%" | "<<" | ">>" | "&") factor}.
-static void parseTerm(Umka *umka, const Type **type, Const *constant)
+static void parseTerm(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
-    parseFactor(umka, type, constant);
+    parseFactor(umka, type, constant, inPlaceOffset);
 
     while (umka->lex.tok.kind == TOK_MUL || umka->lex.tok.kind == TOK_DIV || umka->lex.tok.kind == TOK_MOD ||
            umka->lex.tok.kind == TOK_SHL || umka->lex.tok.kind == TOK_SHR || umka->lex.tok.kind == TOK_AND)
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+
         TokenKind op = umka->lex.tok.kind;
         lexNext(&umka->lex);
 
@@ -2933,20 +2996,23 @@ static void parseTerm(Umka *umka, const Type **type, Const *constant)
             rightConstant = NULL;
 
         const Type *rightType = *type;
-        parseFactor(umka, &rightType, rightConstant);
+        parseFactor(umka, &rightType, rightConstant, NULL);
         doApplyOperator(umka, type, &rightType, constant, rightConstant, op, true, true);
     }
 }
 
 
 // relationTerm = term {("+" | "-" | "|" | "^") term}.
-static void parseRelationTerm(Umka *umka, const Type **type, Const *constant)
+static void parseRelationTerm(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
-    parseTerm(umka, type, constant);
+    parseTerm(umka, type, constant, inPlaceOffset);
 
     while (umka->lex.tok.kind == TOK_PLUS || umka->lex.tok.kind == TOK_MINUS ||
            umka->lex.tok.kind == TOK_OR   || umka->lex.tok.kind == TOK_XOR)
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+
         TokenKind op = umka->lex.tok.kind;
         lexNext(&umka->lex);
 
@@ -2957,20 +3023,23 @@ static void parseRelationTerm(Umka *umka, const Type **type, Const *constant)
             rightConstant = NULL;
 
         const Type *rightType = *type;
-        parseTerm(umka, &rightType, rightConstant);
+        parseTerm(umka, &rightType, rightConstant, NULL);
         doApplyOperator(umka, type, &rightType, constant, rightConstant, op, true, true);
     }
 }
 
 
 // relation = relationTerm [("==" | "!=" | "<" | "<=" | ">" | ">=") relationTerm].
-static void parseRelation(Umka *umka, const Type **type, Const *constant)
+static void parseRelation(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
-    parseRelationTerm(umka, type, constant);
+    parseRelationTerm(umka, type, constant, inPlaceOffset);
 
     if (umka->lex.tok.kind == TOK_EQEQ   || umka->lex.tok.kind == TOK_NOTEQ   || umka->lex.tok.kind == TOK_LESS ||
         umka->lex.tok.kind == TOK_LESSEQ || umka->lex.tok.kind == TOK_GREATER || umka->lex.tok.kind == TOK_GREATEREQ)
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+
         TokenKind op = umka->lex.tok.kind;
         lexNext(&umka->lex);
 
@@ -2981,7 +3050,7 @@ static void parseRelation(Umka *umka, const Type **type, Const *constant)
             rightConstant = NULL;
 
         const Type *rightType = *type;
-        parseRelationTerm(umka, &rightType, rightConstant);
+        parseRelationTerm(umka, &rightType, rightConstant, NULL);
         doApplyOperator(umka, type, &rightType, constant, rightConstant, op, true, true);
 
         *type = umka->types.predecl.boolType;
@@ -2990,12 +3059,15 @@ static void parseRelation(Umka *umka, const Type **type, Const *constant)
 
 
 // logicalTerm = relation {"&&" relation}.
-static void parseLogicalTerm(Umka *umka, const Type **type, Const *constant)
+static void parseLogicalTerm(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
-    parseRelation(umka, type, constant);
+    parseRelation(umka, type, constant, inPlaceOffset);
 
     while (umka->lex.tok.kind == TOK_ANDAND)
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+
         TokenKind op = umka->lex.tok.kind;
         lexNext(&umka->lex);
 
@@ -3006,7 +3078,7 @@ static void parseLogicalTerm(Umka *umka, const Type **type, Const *constant)
                 Const rightConstantBuf, *rightConstant = &rightConstantBuf;
 
                 const Type *rightType = *type;
-                parseRelation(umka, &rightType, rightConstant);
+                parseRelation(umka, &rightType, rightConstant, NULL);
                 doApplyOperator(umka, type, &rightType, constant, rightConstant, op, false, true);
                 constant->intVal = rightConstant->intVal;
             }
@@ -3020,7 +3092,7 @@ static void parseLogicalTerm(Umka *umka, const Type **type, Const *constant)
             blocksEnter(&umka->blocks);
 
             const Type *rightType = *type;
-            parseRelation(umka, &rightType, NULL);
+            parseRelation(umka, &rightType, NULL, NULL);
             doApplyOperator(umka, type, &rightType, NULL, NULL, op, false, true);
 
             doGarbageCollection(umka);
@@ -3034,12 +3106,15 @@ static void parseLogicalTerm(Umka *umka, const Type **type, Const *constant)
 
 
 // logicalExpr = logicalTerm {"||" logicalTerm}.
-static void parseLogicalExpr(Umka *umka, const Type **type, Const *constant)
+static void parseLogicalExpr(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
-    parseLogicalTerm(umka, type, constant);
+    parseLogicalTerm(umka, type, constant, inPlaceOffset);
 
     while (umka->lex.tok.kind == TOK_OROR)
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+
         TokenKind op = umka->lex.tok.kind;
         lexNext(&umka->lex);
 
@@ -3050,7 +3125,7 @@ static void parseLogicalExpr(Umka *umka, const Type **type, Const *constant)
                 Const rightConstantBuf, *rightConstant = &rightConstantBuf;
 
                 const Type *rightType = *type;
-                parseLogicalTerm(umka, &rightType, rightConstant);
+                parseLogicalTerm(umka, &rightType, rightConstant, NULL);
                 doApplyOperator(umka, type, &rightType, constant, rightConstant, op, false, true);
                 constant->intVal = rightConstant->intVal;
             }
@@ -3064,7 +3139,7 @@ static void parseLogicalExpr(Umka *umka, const Type **type, Const *constant)
             blocksEnter(&umka->blocks);
 
             const Type *rightType = *type;
-            parseLogicalTerm(umka, &rightType, NULL);
+            parseLogicalTerm(umka, &rightType, NULL, NULL);
             doApplyOperator(umka, type, &rightType, NULL, NULL, op, false, true);
 
             doGarbageCollection(umka);
@@ -3078,13 +3153,19 @@ static void parseLogicalExpr(Umka *umka, const Type **type, Const *constant)
 
 
 // expr = logicalExpr ["?" expr ":" expr].
-void parseExpr(Umka *umka, const Type **type, Const *constant)
+static void parseExprInPlace(Umka *umka, const Type **type, Const *constant, const int **inPlaceOffset)
 {
-    parseLogicalExpr(umka, type, constant);
+    if (umka->gen.exprNesting++ >= MAX_EXPR_NESTING)
+        umka->error.handler(umka->error.context, "Expression nesting is too deep");
+    
+    parseLogicalExpr(umka, type, constant, inPlaceOffset);
 
     // "?"
     if (umka->lex.tok.kind == TOK_QUESTION)
     {
+        if (inPlaceOffset)
+            *inPlaceOffset = NULL;
+
         typeAssertCompatible(&umka->types, umka->types.predecl.boolType, *type);
         lexNext(&umka->lex);
 
@@ -3168,6 +3249,14 @@ void parseExpr(Umka *umka, const Type **type, Const *constant)
 
     if ((*type)->kind == TYPE_VOID)
         umka->error.handler(umka->error.context, "Void expression is not allowed");
+
+    umka->gen.exprNesting--;
+}
+
+
+void parseExpr(Umka *umka, const Type **type, Const *constant)
+{
+    parseExprInPlace(umka, type, constant, NULL);
 }
 
 

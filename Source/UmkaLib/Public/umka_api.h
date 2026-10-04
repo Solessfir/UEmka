@@ -217,7 +217,7 @@ typedef struct
     UmkaGetFieldType    umkaGetFieldType;
     UmkaGetMapKeyType   umkaGetMapKeyType;
     UmkaGetMapItemType  umkaGetMapItemType;
-    UmkaAddClosure      umkaAddClosure;
+    UmkaAddClosure      umkaAddClosure;   
     UmkaIsStaticArrayType umkaIsStaticArrayType;
     UmkaIsDynArrayType  umkaIsDynArrayType;
     UmkaGetTypeSize     umkaGetTypeSize;

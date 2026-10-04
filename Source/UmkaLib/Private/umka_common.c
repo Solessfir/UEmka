@@ -213,6 +213,46 @@ static void *moduleLoadImplLibFunc(void *lib, const char *name)
 }
 
 
+static char *moduleCurFolder(char *buf, int size)
+{
+#ifdef _WIN32
+    if (GetCurrentDirectory(size, buf) == 0)
+        return NULL;
+#else
+    if (!getcwd(buf, size))
+        return NULL;
+#endif
+
+    int len = strlen(buf);
+
+    if (len > 0 && (buf[len - 1] == '/' || buf[len - 1] == '\\'))
+        return buf;
+
+    if (len > size - 2)
+        return NULL;
+
+    buf[len] = '/';
+    buf[len + 1] = 0;
+    return buf;
+}
+
+
+static bool modulePathIsAbsolute(const char *path)
+{
+    if (!path)
+        return false;
+
+    while (*path == ' ' || *path == '\t')
+        path++;
+
+#ifdef _WIN32
+    return isalpha(path[0]) && path[1] == ':';
+#else
+    return path[0] == '/';
+#endif
+}
+
+
 void moduleInit(Modules *modules, Storage *storage, bool implLibsEnabled, Error *error)
 {
     for (int i = 0; i < MAX_MODULES; i++)
@@ -381,46 +421,6 @@ void *moduleGetImplLibFunc(const Module *module, const char *name)
     if (module->implLib)
         return moduleLoadImplLibFunc(module->implLib, name);
     return NULL;
-}
-
-
-char *moduleCurFolder(char *buf, int size)
-{
-#ifdef _WIN32
-    if (GetCurrentDirectory(size, buf) == 0)
-        return NULL;
-#else
-    if (!getcwd(buf, size))
-        return NULL;
-#endif
-
-    int len = strlen(buf);
-
-    if (len > 0 && (buf[len - 1] == '/' || buf[len - 1] == '\\'))
-        return buf;
-
-    if (len > size - 2)
-        return NULL;
-
-    buf[len] = '/';
-    buf[len + 1] = 0;
-    return buf;
-}
-
-
-bool modulePathIsAbsolute(const char *path)
-{
-    if (!path)
-        return false;
-
-    while (*path == ' ' || *path == '\t')
-        path++;
-
-#ifdef _WIN32
-    return isalpha(path[0]) && path[1] == ':';
-#else
-    return path[0] == '/';
-#endif
 }
 
 

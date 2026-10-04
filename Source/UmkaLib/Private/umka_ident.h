@@ -1,7 +1,6 @@
 #ifndef UMKA_IDENT_H_INCLUDED
 #define UMKA_IDENT_H_INCLUDED
 
-#include "umka_common.h"
 #include "umka_vm.h"
 
 

@@ -105,7 +105,7 @@ enum
 };
 
 
-int lexInit(Lexer *lex, Storage *storage, DebugInfo *debug, const char *fileName, const char *sourceString, bool trusted, Error *error)
+void lexInit(Lexer *lex, Storage *storage, DebugInfo *debug, const char *fileName, const char *sourceString, bool trusted, Error *error)
 {
     // Initialize lexer
     errno = 0;
@@ -161,8 +161,6 @@ int lexInit(Lexer *lex, Storage *storage, DebugInfo *debug, const char *fileName
     lex->debug->fileName = lex->fileName;
     lex->debug->fnName = "<unknown>";
     lex->debug->line = lex->line;
-
-    return bufLen;
 }
 
 

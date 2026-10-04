@@ -17,8 +17,10 @@ enum
     MAX_IDENTS_IN_LIST  = 16,
     MAX_MODULES         = 1024,
     MAX_PARAMS          = 16,
-    MAX_BLOCK_NESTING   = 100,
-    MAX_GOTOS           = 100,
+    MAX_EXPR_NESTING    = 256,
+    MAX_BLOCK_NESTING   = 128,
+    MAX_TYPE_NESTING    = 128,
+    MAX_GOTOS           = 128,
 };
 
 
@@ -242,8 +244,6 @@ int   moduleAdd                 (Modules *modules, const char *path);
 const ModuleSource *moduleFindSource(const Modules *modules, const char *path);
 void  moduleAddSource           (Modules *modules, const char *path, const char *source, bool trusted);
 void *moduleGetImplLibFunc      (const Module  *module,  const char *name);
-char *moduleCurFolder           (char *buf, int size);
-bool  modulePathIsAbsolute      (const char *path);
 bool  moduleRegularizePath      (const Modules *modules, const char *path, const char *curFolder, char *regularizedPath, int size);
 void  moduleAssertRegularizePath(const Modules *modules, const char *path, const char *curFolder, char *regularizedPath, int size);
 

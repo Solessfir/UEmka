@@ -4,7 +4,6 @@
 #include "umka_compiler.h"
 
 void doGarbageCollection(Umka *umka);
-void doGarbageCollectionDownToBlock(Umka *umka, int block);
 
 void doZeroVar(Umka *umka, const Ident *ident);
 void doResolveExtern(Umka *umka);

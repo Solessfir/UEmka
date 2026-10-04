@@ -5,7 +5,6 @@
 #include <limits.h>
 #include <float.h>
 
-#include "umka_common.h"
 #include "umka_lexer.h"
 
 

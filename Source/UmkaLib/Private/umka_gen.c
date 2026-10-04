@@ -43,6 +43,7 @@ void genInit(CodeGen *gen, Storage *storage, DebugInfo *debug, Error *error)
     gen->code = storageAdd(gen->storage, gen->capacity * sizeof(Instruction));
     gen->top = -1;
     gen->lastJump = 0;
+    gen->exprNesting = 0;
     gen->breaks = gen->continues = gen->returns = NULL;
     gen->debug = debug;
     gen->debugPerInstr = storageAdd(gen->storage, gen->capacity * sizeof(DebugInfo));
@@ -163,6 +164,13 @@ static bool optimizePop(CodeGen *gen)
     {
         prev->operand.intVal++;
         genUnnotify(gen);
+        return true;
+    }
+
+    // Optimization: PUSH_LOCAL_PTR + POP -> 0
+    if (prev && prev->opcode == OP_PUSH_LOCAL_PTR)
+    {
+        genRemoveInstr(gen);
         return true;
     }
 
@@ -1154,7 +1162,7 @@ void genGotosProlog(CodeGen *gen, Gotos *gotos, int block)
 void genGotosAddStub(CodeGen *gen, Gotos *gotos)
 {
     if (gotos->numGotos >= MAX_GOTOS)
-        gen->error->handler(gen->error->context, "To many break/continue/return statements");
+        gen->error->handler(gen->error->context, "Too many break/continue/return statements");
 
     gotos->start[gotos->numGotos++] = gen->ip;
     genNop(gen);                                            // Goto block/function end (stub)

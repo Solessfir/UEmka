@@ -1,7 +1,6 @@
 #ifndef UMKA_CONST_H_INCLUDED
 #define UMKA_CONST_H_INCLUDED
 
-#include "umka_lexer.h"
 #include "umka_vm.h"
 
 

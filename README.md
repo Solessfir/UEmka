@@ -2,13 +2,15 @@
 
 **UEmka** is an Unreal Engine plugin that embeds the [Umka](https://github.com/vtereshkov/umka-lang) scripting language directly into Blueprint nodes.
 
+Bundled interpreter: [Umka 1.5.7](https://github.com/vtereshkov/umka-lang/releases/tag/v1.5.7). See [vendoring details](Source/UmkaLib/README.md) for the pinned source revision and integration patches.
+
 ![Example Screenshot](Resources/Screenshot.png)
 
 ### What is Umka
 
 [Umka](https://github.com/vtereshkov/umka-lang) is a statically typed embeddable scripting language. It combines simplicity and flexibility with compile-time type checking, following the principle _Explicit is better than implicit_.
 
-[The Umka Language Reference](https://github.com/vtereshkov/umka-lang/blob/master/doc/lang.md)
+[The Umka Language Reference](https://github.com/vtereshkov/umka-lang/blob/v1.5.7/doc/lang.md)
 
 
 ## Installation

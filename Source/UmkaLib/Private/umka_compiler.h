@@ -8,7 +8,6 @@
 #include "umka_gen.h"
 #include "umka_ident.h"
 #include "umka_const.h"
-#include "umka_runtime.h"
 #include "umka_api.h"
 
 

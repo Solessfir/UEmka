@@ -10,6 +10,7 @@
 #endif
 
 #include "umka_compiler.h"
+#include "umka_runtime.h"
 #include "umka_runtime_src.h"
 
 
@@ -55,7 +56,7 @@ static void compilerSetAPI(Umka *umka)
     umka->api.umkaGetFieldType      = umkaGetFieldType;
     umka->api.umkaGetMapKeyType     = umkaGetMapKeyType;
     umka->api.umkaGetMapItemType    = umkaGetMapItemType; 
-    umka->api.umkaAddClosure        = umkaAddClosure;
+    umka->api.umkaAddClosure        = umkaAddClosure;        
     umka->api.umkaIsStaticArrayType = umkaIsStaticArrayType;
     umka->api.umkaIsDynArrayType    = umkaIsDynArrayType;
     umka->api.umkaGetTypeSize       = umkaGetTypeSize;

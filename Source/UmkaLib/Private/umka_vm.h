@@ -1,9 +1,7 @@
 #ifndef UMKA_VM_H_INCLUDED
 #define UMKA_VM_H_INCLUDED
 
-#include "umka_api.h"
 #include "umka_common.h"
-#include "umka_lexer.h"
 #include "umka_types.h"
 
 
@@ -26,6 +24,12 @@ enum    // Memory manager settings
     MEM_MIN_HEAP_CHUNK    = 64,                     // Bytes
     MEM_MIN_HEAP_PAGE     = 1024 * 1024,            // Bytes
     MEM_MAX_BLACKLISTED   = 16 * 1024 * 1024        // Bytes   
+};
+
+
+enum
+{
+    MAX_VM_CALL_NESTING = 64
 };
 
 
@@ -198,6 +202,7 @@ typedef struct tagVM
     HeapPages pages;
     UmkaHookFunc hooks[UMKA_NUM_HOOKS];
     bool terminatedNormally;
+    int callNesting;
     Storage *storage;
     Error *error;
 } VM;

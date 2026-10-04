@@ -123,7 +123,7 @@ typedef struct
 } Lexer;
 
 
-int lexInit(Lexer *lex, Storage *storage, DebugInfo *debug, const char *fileName, const char *sourceString, bool trusted, Error *error);
+void lexInit(Lexer *lex, Storage *storage, DebugInfo *debug, const char *fileName, const char *sourceString, bool trusted, Error *error);
 void lexFree(Lexer *lex);
 void lexNext(Lexer *lex);
 void lexNextForcedSemicolon(Lexer *lex);

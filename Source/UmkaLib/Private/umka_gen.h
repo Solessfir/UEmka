@@ -10,7 +10,6 @@ typedef struct
     int start[MAX_GOTOS];
     int numGotos;
     int block;
-    const Type *returnType;
 } Gotos;
 
 
@@ -35,6 +34,7 @@ typedef struct
     int stack[MAX_BLOCK_NESTING];
     int top;
     int lastJump;
+    int exprNesting;
     Gotos *breaks, *continues, *returns;
     Storage *storage;
     DebugInfo *debug, *debugPerInstr;
@@ -59,7 +59,6 @@ void genPushLocalPtr    (CodeGen *gen, int offset);
 void genPushLocalPtrZero(CodeGen *gen, int offset, int size);
 void genPushLocal       (CodeGen *gen, TypeKind typeKind, int offset);
 void genPushReg         (CodeGen *gen, RegisterIndex regIndex);
-void genPushStruct      (CodeGen *gen, int size);
 void genPushUpvalue     (CodeGen *gen);
 void genPushZero        (CodeGen *gen, int slots);
 
