@@ -1,6 +1,9 @@
 // Copyright Solessfir 2026. All Rights Reserved.
 
 #include "UEmkaFunctionLibrary.h"
+#include "UEmkaComposite.h"
+#include "UObject/Stack.h"
+#include "UObject/UnrealType.h"
 #include "umka_api.h"
 #include "HAL/CriticalSection.h"
 #include "Misc/ScopeLock.h"
@@ -87,7 +90,8 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 	Value.bIsArray = Value.bIsStaticArray || umkaIsDynArrayType(Type);
 	Value.bIsTuple = umkaIsExprListType(Type);
 	Value.bIsStruct = !Value.bIsTuple && umkaGetFieldCount(Type) >= 0;
-	if (Depth > 2)
+	Value.bIsMap = KindName && FCStringAnsi::Strcmp(KindName, "map") == 0;
+	if (Depth > 16)
 	{
 		return Value;
 	}
@@ -100,11 +104,12 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 	if (Value.bIsArray)
 	{
 		const FUEmkaCompiledValue Element = DescribeCompiledValue(umkaGetBaseType(Type), Depth + 1);
-		Value.Type = Element.Type;
+		Value.Type = Element.bIsStruct ? EUEmkaValueType::Composite : Element.Type;
 		Value.bIsEnum = Element.bIsEnum;
 		Value.EnumByteSize = Element.EnumByteSize;
 		Value.ArrayLen = Value.bIsStaticArray ? umkaGetArrayLen(Type) : 0;
-		Value.bSupported = Element.bSupported && !Element.bIsArray && !Element.bIsStruct && !Element.bIsTuple && Element.Type != EUEmkaValueType::Void;
+		Value.bSupported = Element.bSupported && !Element.bIsArray && !Element.bIsMap && !Element.bIsTuple && Element.Type != EUEmkaValueType::Void;
+		if (Element.bIsStruct) Value.Fields.Add(Element);
 		if (!DeclaredName)
 		{
 			Value.TypeName = Value.bIsStaticArray
@@ -113,9 +118,22 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 		}
 		return Value;
 	}
-	if ((Value.bIsStruct || Value.bIsTuple) && Depth == 0)
+	if (Value.bIsMap)
 	{
-		Value.bSupported = Value.bIsTuple || (DeclaredName && *DeclaredName);
+		Value.Type = EUEmkaValueType::Composite;
+		Value.Fields = {DescribeCompiledValue(umkaGetMapKeyType(Type), Depth + 1), DescribeCompiledValue(umkaGetMapItemType(Type), Depth + 1)};
+		const FUEmkaCompiledValue& Key = Value.Fields[0];
+		const FUEmkaCompiledValue& Item = Value.Fields[1];
+		Value.bSupported = Key.bSupported && Item.bSupported && !Key.bIsArray && !Key.bIsStruct && !Key.bIsMap
+			&& !Item.bIsArray && !Item.bIsStruct && !Item.bIsMap && Item.Type != EUEmkaValueType::Void
+			&& (Key.Type <= EUEmkaValueType::UInt || Key.Type == EUEmkaValueType::Str);
+		if (!DeclaredName) Value.TypeName = TEXT("map[") + Key.TypeName + TEXT("]") + Item.TypeName;
+		return Value;
+	}
+	if (Value.bIsStruct || Value.bIsTuple)
+	{
+		Value.Type = EUEmkaValueType::Composite;
+		Value.bSupported = (Value.bIsTuple || (DeclaredName && *DeclaredName)) && umkaGetFieldCount(Type) > 0;
 		TArray<FString> FieldTypeNames;
 		for (int32 Index = 0; Index < umkaGetFieldCount(Type); ++Index)
 		{
@@ -124,8 +142,7 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 			{
 				Field.Name = UTF8_TO_TCHAR(FieldName);
 			}
-			Field.bSupported = Field.bSupported && !Field.bIsStruct && !Field.bIsTuple
-				&& (Value.bIsTuple || !Field.bIsArray) && Field.Type != EUEmkaValueType::Void;
+			Field.bSupported = Field.bSupported && !Field.bIsTuple && Field.Type != EUEmkaValueType::Void;
 			Value.bSupported &= Field.bSupported;
 			FieldTypeNames.Add(Field.TypeName);
 			Value.Fields.Add(MoveTemp(Field));
@@ -145,6 +162,12 @@ static bool MatchesCompiledScalarType(const EUEmkaValueType Type, const UmkaType
 		&& (Type == ActualType
 			|| (bAllowIntegerConversion && Type <= EUEmkaValueType::Char && ActualType <= EUEmkaValueType::Char)
 			|| (Type == EUEmkaValueType::Enum && umkaIsEnumType(CompiledType)));
+}
+
+static bool IsCompiledComposite(const UmkaType* Type)
+{
+	const FUEmkaCompiledValue Value = DescribeCompiledValue(Type);
+	return Value.bSupported && (Value.bIsArray || Value.bIsMap || Value.bIsStruct);
 }
 
 static bool IsIntegerInRange(const int64 Value, const EUEmkaValueType Type)
@@ -291,6 +314,49 @@ static void ReadDynArrayResult(const FUmkaDynArrayHeader& Header, const EUEmkaVa
 	ReadArrayResult(Header.data, umkaGetDynArrayLen(&Header), Type, Out);
 }
 
+static void SetCompiledDefault(FUEmkaCompiledValue& Value, const UmkaType* Type, const void* Data)
+{
+	Value.bHasDefault = true;
+	if (Value.bIsStruct)
+	{
+		for (int32 Index = 0; Index < Value.Fields.Num(); ++Index)
+		{
+			SetCompiledDefault(Value.Fields[Index], umkaGetFieldTypeByIndex(Type, Index),
+				static_cast<const uint8*>(Data) + umkaGetFieldOffsetByIndex(Type, Index));
+			Value.bSupported &= Value.Fields[Index].bSupported;
+		}
+	}
+	else if (Value.bIsArray || Value.bIsMap)
+	{
+		FString Error;
+		Value.bHasDefault = UEmkaComposite::ReadUmka(Type, Data, Value.DefaultCompositeValue, Error);
+		Value.bSupported &= Value.bHasDefault;
+	}
+	else if (Value.Type == EUEmkaValueType::Str)
+	{
+		const char* Text;
+		FMemory::Memcpy(&Text, Data, sizeof(Text));
+		Value.DefaultValue = Text ? UTF8_TO_TCHAR(Text) : TEXT("");
+	}
+	else if (Value.Type == EUEmkaValueType::Real)
+	{
+		double Number;
+		FMemory::Memcpy(&Number, Data, sizeof(Number));
+		Value.DefaultValue = FString::Printf(TEXT("%.17g"), Number);
+	}
+	else if (Value.Type == EUEmkaValueType::Real32)
+	{
+		float Number;
+		FMemory::Memcpy(&Number, Data, sizeof(Number));
+		Value.DefaultValue = FString::Printf(TEXT("%.9g"), static_cast<double>(Number));
+	}
+	else
+	{
+		const int64 Number = LoadIntElem(Data, 0, Value.Type);
+		Value.DefaultValue = Value.Type == EUEmkaValueType::Bool ? (Number ? TEXT("true") : TEXT("false")) : LexToString(Number);
+	}
+}
+
 // Formats the current Umka error as "file:line: msg", or returns Fallback when unavailable.
 static FString FormatUmkaError(Umka* VM, const TCHAR* Fallback)
 {
@@ -341,6 +407,17 @@ static bool PushUmkaParams(Umka* Umka, const UmkaFuncContext& Context, const int
 		{
 			Error = FString::Printf(TEXT("Parameter %d array-kind metadata does not match the compiled Umka signature"), i + 1);
 			return false;
+		}
+		if (Param.Type == EUEmkaValueType::Composite)
+		{
+			if (!IsCompiledComposite(ParamType))
+			{
+				Error = FString::Printf(TEXT("Parameter %d has unsupported composite metadata"), i + 1);
+				return false;
+			}
+			FMemory::Memzero(Slot, umkaGetTypeSize(ParamType));
+			if (!UEmkaComposite::WriteUmka(Umka, ParamType, Param.CompositeValue, Slot, Error)) return false;
+			continue;
 		}
 		const UmkaType* ValueType = Param.bIsArray && ParamType ? umkaGetBaseType(ParamType) : ParamType;
 		EUEmkaValueType ActualType;
@@ -706,15 +783,22 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 	const bool bCompiledDynArray = umkaIsDynArrayType(CompiledResultType);
 	const UmkaType* ResultValueType = bCompiledStaticArray || bCompiledDynArray ? umkaGetBaseType(CompiledResultType) : CompiledResultType;
 	EUEmkaValueType ActualResultType;
+	const bool bCompositeResult = ResultType == EUEmkaValueType::Composite;
 	if (bResultIsArray != (bCompiledStaticArray || bCompiledDynArray)
 		|| bResultIsStaticArray != bCompiledStaticArray
-		|| !MatchesCompiledScalarType(ResultType, ResultValueType)
-		|| !GetCompiledScalarType(ResultValueType, ActualResultType))
+		|| (bCompositeResult ? !IsCompiledComposite(CompiledResultType)
+			: (!MatchesCompiledScalarType(ResultType, ResultValueType) || !GetCompiledScalarType(ResultValueType, ActualResultType))))
 	{
 		Error = TEXT("Result type or array-kind metadata does not match the compiled Umka signature");
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
-	if (bResultIsArray && Vm.Context.result)
+	TArray<uint8> CompositeResult;
+	if (bCompositeResult && Vm.Context.result)
+	{
+		CompositeResult.SetNumZeroed(FMath::Max(umkaGetTypeSize(CompiledResultType), 1));
+		Vm.Context.result->ptrVal = CompositeResult.GetData();
+	}
+	else if (bResultIsArray && Vm.Context.result)
 	{
 		if (bCompiledStaticArray)
 		{
@@ -739,6 +823,18 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 	#if UEMKA_CAPTURE_STDOUT
 	StdoutCapture.FlushToLog(FunctionName);
 	#endif
+	if (bSuccess && bCompositeResult)
+	{
+		Result.Type = ResultType;
+		Result.bIsArray = bResultIsArray;
+		Result.bIsStaticArray = bResultIsStaticArray;
+		if (!UEmkaComposite::ReadUmka(CompiledResultType, CompositeResult.GetData(), Result.CompositeValue, Error))
+		{
+			Result = {};
+			return LogUmkaFailure(Caller, FunctionName, Error);
+		}
+		return true;
+	}
 
 	if (bSuccess && ResultType != EUEmkaValueType::Void && Vm.Context.result)
 	{
@@ -878,9 +974,9 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 		const int32 ExpectedArrayKind = bCompiledStaticArray ? 2 : (bCompiledDynArray ? 1 : 0);
 		const UmkaType* FieldValueType = ExpectedArrayKind != 0 ? umkaGetBaseType(FieldTypes[i]) : FieldTypes[i];
 		if (FieldOffsets[i] < 0 || !FieldTypes[i] || RetArrayKinds[i] != ExpectedArrayKind
-			|| !MatchesCompiledScalarType(RetTypes[i], FieldValueType)
-			|| !GetCompiledScalarType(FieldValueType, ActualFieldTypes[i])
-			|| ActualFieldTypes[i] == EUEmkaValueType::Void)
+			|| (RetTypes[i] == EUEmkaValueType::Composite ? !IsCompiledComposite(FieldTypes[i])
+				: (!MatchesCompiledScalarType(RetTypes[i], FieldValueType) || !GetCompiledScalarType(FieldValueType, ActualFieldTypes[i])
+					|| ActualFieldTypes[i] == EUEmkaValueType::Void)))
 		{
 			Error = FString::Printf(TEXT("Result %d type or array-kind metadata does not match the compiled Umka signature"), i + 1);
 			return LogUmkaFailure(Caller, FunctionName, Error);
@@ -923,7 +1019,15 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 			R.bIsArray = bIsArr;
 			R.bIsStaticArray = bIsStaticArray;
 
-			if (bIsArr)
+			if (T == EUEmkaValueType::Composite)
+			{
+				if (!UEmkaComposite::ReadUmka(FieldTypes[i], FieldPtr, R.CompositeValue, Error))
+				{
+					Results.Reset();
+					return LogUmkaFailure(Caller, FunctionName, Error);
+				}
+			}
+			else if (bIsArr)
 			{
 				if (bIsStaticArray)
 				{
@@ -991,7 +1095,16 @@ bool UUEmkaFunctionLibrary::InspectScriptFunction(const FString& Script, const F
 	const int32 ParamCount = umkaGetFuncParamCount(Vm.FunctionType);
 	for (int32 Index = 0; Index < ParamCount; ++Index)
 	{
-		FUEmkaCompiledValue Param = DescribeCompiledValue(umkaGetFuncParamTypeByIndex(Vm.FunctionType, Index));
+		const UmkaType* ParamType = umkaGetFuncParamTypeByIndex(Vm.FunctionType, Index);
+		FUEmkaCompiledValue Param = DescribeCompiledValue(ParamType);
+		UmkaStackSlot Default = {};
+		if (Param.bSupported && umkaGetFuncParamDefaultValue(Vm.FunctionType, Index, &Default))
+		{
+			float FloatDefault = static_cast<float>(Default.realVal);
+			const void* Data = Param.bIsStruct || Param.bIsArray || Param.bIsMap ? Default.ptrVal
+				: (Param.Type == EUEmkaValueType::Real32 ? static_cast<const void*>(&FloatDefault) : static_cast<const void*>(&Default));
+			if (Data) SetCompiledDefault(Param, ParamType, Data);
+		}
 		if (const char* ParamName = umkaGetFuncParamNameByIndex(Vm.FunctionType, Index))
 		{
 			Param.Name = UTF8_TO_TCHAR(ParamName);
@@ -1000,6 +1113,99 @@ bool UUEmkaFunctionLibrary::InspectScriptFunction(const FString& Script, const F
 	}
 	OutSignature.Result = DescribeCompiledValue(umkaGetFuncResultType(Vm.FunctionType));
 	return true;
+}
+
+bool UUEmkaFunctionLibrary::EncodeComposite(const FProperty* Property, const void* Value, FUEmkaScriptParam& Out, FString& Error, const bool bIsStaticArray)
+{
+	Out = {};
+	Error.Reset();
+	Out.Type = EUEmkaValueType::Composite;
+	Out.bIsArray = Property && (Property->ArrayDim > 1 || CastField<FArrayProperty>(Property) != nullptr);
+	Out.bIsStaticArray = bIsStaticArray || (Property && Property->ArrayDim > 1);
+	if (!UEmkaComposite::EncodeProperty(Property, Value, Out.CompositeValue, Error))
+	{
+		Out = {};
+		return false;
+	}
+	return true;
+}
+
+bool UUEmkaFunctionLibrary::DecodeComposite(const FUEmkaScriptParam& Result, FProperty* Property, void* Value, FString& Error)
+{
+	Error.Reset();
+	if (!Property || !Value)
+	{
+		Error = TEXT("Missing reflected result storage");
+		return false;
+	}
+	if (Result.Type != EUEmkaValueType::Composite)
+	{
+		if (!Result.CompositeValue.IsEmpty())
+		{
+			Error = TEXT("Composite payload has inconsistent type metadata");
+			return false;
+		}
+		Property->ClearValue(Value);
+		return true;
+	}
+	return UEmkaComposite::DecodeProperty(Result.CompositeValue, Property, Value, Error);
+}
+
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeCompositeParam(const int32& Value, const bool bIsStaticArray)
+{
+	checkNoEntry();
+	return {};
+}
+
+DEFINE_FUNCTION(UUEmkaFunctionLibrary::execMakeCompositeParam)
+{
+	Stack.MostRecentProperty = nullptr;
+	Stack.StepCompiledIn<FProperty>(nullptr);
+	const FProperty* Property = Stack.MostRecentProperty;
+	const void* Value = Stack.MostRecentPropertyAddress;
+	P_GET_UBOOL(bIsStaticArray);
+	P_FINISH;
+	P_NATIVE_BEGIN;
+	FString Error;
+	if (!EncodeComposite(Property, Value, *static_cast<FUEmkaScriptParam*>(RESULT_PARAM), Error, bIsStaticArray))
+	{
+		UE_LOG(LogUEmka, Error, TEXT("Could not encode Blueprint value: %s"), *Error);
+	}
+	P_NATIVE_END;
+}
+
+void UUEmkaFunctionLibrary::GetCompositeResult(const FUEmkaScriptParam& Result, int32& Value)
+{
+	checkNoEntry();
+}
+
+DEFINE_FUNCTION(UUEmkaFunctionLibrary::execGetCompositeResult)
+{
+	P_GET_STRUCT(FUEmkaScriptParam, Result);
+	Stack.MostRecentProperty = nullptr;
+	Stack.StepCompiledIn<FProperty>(nullptr);
+	FProperty* Property = Stack.MostRecentProperty;
+	void* Value = Stack.MostRecentPropertyAddress;
+	P_FINISH;
+	P_NATIVE_BEGIN;
+	FString Error;
+	if (!DecodeComposite(Result, Property, Value, Error))
+	{
+		if (Property && Value) Property->ClearValue(Value);
+		UE_LOG(LogUEmka, Error, TEXT("Could not decode Umka result: %s"), *Error);
+	}
+	P_NATIVE_END;
+}
+
+FUEmkaScriptParam UUEmkaFunctionLibrary::MakeCompositeDefaultParam(const FString& Value, const bool bIsArray, const bool bIsStaticArray)
+{
+	FUEmkaScriptParam Result;
+	Result.Type = EUEmkaValueType::Composite;
+	Result.bIsArray = bIsArray;
+	Result.bIsStaticArray = bIsStaticArray;
+	Result.CompositeValue.SetNum(Value.Len() / 2);
+	FString::ToHexBlob(Value, Result.CompositeValue.GetData(), Result.CompositeValue.Num());
+	return Result;
 }
 
 bool UUEmkaFunctionLibrary::CompileCheckScript(const FString& Script, FString& OutError, int32& OutLine)

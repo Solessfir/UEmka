@@ -26,6 +26,7 @@ enum class EUEmkaValueType : uint8
 	Str		UMETA(DisplayName = "str"),		// ptrVal (umkaMakeStr), PC_String
 	Enum	UMETA(DisplayName = "enum"),	// Legacy enum marker; compiled signatures use the underlying integer type
 	Void	UMETA(DisplayName = "void"),	// No return value
+	Composite UMETA(Hidden),
 };
 
 struct UEMKA_API FUEmkaCompiledValue
@@ -39,9 +40,14 @@ struct UEMKA_API FUEmkaCompiledValue
 	bool bIsEnum = false;
 	bool bIsStruct = false;
 	bool bIsTuple = false;
+	bool bIsMap = false;
+	bool bHasDefault = false;
+	FString DefaultValue;
+	TArray<uint8> DefaultCompositeValue;
 	int32 ArrayLen = 0;
 	int32 EnumByteSize = 8;
 	TArray<FUEmkaCompiledValue> Fields;
+	bool operator==(const FUEmkaCompiledValue&) const = default;
 };
 
 struct UEMKA_API FUEmkaCompiledSignature
@@ -97,6 +103,9 @@ struct FUEmkaScriptParam
 
 	UPROPERTY(BlueprintReadWrite, Category = "UEmka")
 	TArray<FString> StringArrayValue;
+
+	UPROPERTY()
+	TArray<uint8> CompositeValue;
 };
 
 UCLASS()
@@ -126,6 +135,20 @@ public:
 
 	// Compile-only signature inspection. Unsupported shapes are reported through bSupported.
 	static bool InspectScriptFunction(const FString& Script, const FString& FunctionName, FUEmkaCompiledSignature& OutSignature);
+
+	UFUNCTION(BlueprintPure, CustomThunk, Meta = (BlueprintInternalUseOnly = true, CustomStructureParam = "Value"), Category = "UEmka")
+	static FUEmkaScriptParam MakeCompositeParam(const int32& Value, const bool bIsStaticArray);
+	DECLARE_FUNCTION(execMakeCompositeParam);
+
+	UFUNCTION(BlueprintPure, CustomThunk, Meta = (BlueprintInternalUseOnly = true, CustomStructureParam = "Value"), Category = "UEmka")
+	static void GetCompositeResult(const FUEmkaScriptParam& Result, int32& Value);
+	DECLARE_FUNCTION(execGetCompositeResult);
+
+	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
+	static FUEmkaScriptParam MakeCompositeDefaultParam(const FString& Value, const bool bIsArray, const bool bIsStaticArray);
+
+	static bool EncodeComposite(const FProperty* Property, const void* Value, FUEmkaScriptParam& Out, FString& Error, const bool bIsStaticArray = false);
+	static bool DecodeComposite(const FUEmkaScriptParam& Result, FProperty* Property, void* Value, FString& Error);
 
 	// --- Param construction helpers (ExpandNode intermediate graph only) ---
 

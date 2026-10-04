@@ -146,12 +146,15 @@ bool FUEmkaUnsupportedCompiledShapesTest::RunTest(const FString& Parameters)
 {
 	const TArray<FString> Scripts =
 	{
-		TEXT("type Item = struct { Value: int }\nfn Test*(Values: []Item) {}"),
-		TEXT("type Item = struct { Value: int }\nfn Test*(Values: [2]Item) {}"),
-		TEXT("type Item = struct { Values: []int }\nfn Test*(Value: Item) {}"),
-		TEXT("type Inner = struct { Value: int }\ntype Outer = struct { Value: Inner }\nfn Test*(Value: Outer) {}"),
-		TEXT("type Item = struct { Value: int }\nfn Test*(Value: Item): (Item, int) { return Value, 1 }"),
-		TEXT("fn Test*(Value: map[int]int) {}"),
+		TEXT("type Item = struct { Value: ^int }\nfn Test*(Values: []Item) {}"),
+		TEXT("type Item = struct { Value: ^int }\nfn Test*(Values: [2]Item) {}"),
+		TEXT("type Item = struct { Values: [][]int }\nfn Test*(Value: Item) {}"),
+		TEXT("type Inner = struct { Value: ^int }\ntype Outer = struct { Value: Inner }\nfn Test*(Value: Outer) {}"),
+		TEXT("type Item = struct { Value: ^int }\nfn Test*(Value: Item): (Item, int) { return Value, 1 }"),
+		TEXT("fn Test*(Value: map[real]int) {}"),
+		TEXT("fn Test*(Value: map[int][]int) {}"),
+		TEXT("fn Test*(Value: [][]int) {}"),
+		TEXT("fn Test*(Value: any) {}"),
 		TEXT("fn Test*(Value: fn(Argument: int): int) {}"),
 		TEXT("fn Test*(Value: ^int) {}"),
 		TEXT("fn Test*(Value: weak ^int) {}"),

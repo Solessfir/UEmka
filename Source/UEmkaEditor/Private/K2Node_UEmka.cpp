@@ -10,6 +10,7 @@
 #include "KismetCompiler.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "UEmkaFunctionLibrary.h"
+#include "UEmkaRecordTypes.h"
 #include UE_INLINE_GENERATED_CPP_BY_NAME(K2Node_UEmka)
 
 #define LOCTEXT_NAMESPACE "K2Node_UEmka"
@@ -434,6 +435,7 @@ static FUEmkaPinDef MakeCompiledPin(const FUEmkaCompiledValue& Value, const FStr
 	Pin.bIsStaticArray = Value.bIsStaticArray;
 	Pin.EnumByteSize = Value.EnumByteSize;
 	Pin.FriendlyName = FriendlyName;
+	Pin.CompiledValue = Value;
 	if (Value.bIsEnum)
 	{
 		Pin.EnumTypeName = Value.TypeName;
@@ -450,6 +452,25 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 	FUEmkaSignature Sig;
 	Sig.FunctionName = FunctionName;
 	Sig.bValid = true;
+	TFunction<FString(const FUEmkaCompiledValue&, const FString&, const FString&)> FlattenInput;
+	FlattenInput = [&Sig, &FlattenInput](const FUEmkaCompiledValue& Value, const FString& Name, const FString& FriendlyName)
+	{
+		if (Value.bIsStruct)
+		{
+			Sig.bNeedsShim = true;
+			TArray<FString> Initializers;
+			for (const FUEmkaCompiledValue& Field : Value.Fields)
+			{
+				Initializers.Add(Field.Name + TEXT(": ") + FlattenInput(Field, Name + TEXT("_") + Field.Name, FriendlyName + TEXT(".") + Field.Name));
+			}
+			return Value.TypeName + TEXT("{") + FString::Join(Initializers, TEXT(", ")) + TEXT("}");
+		}
+		Sig.Params.Add(MakeCompiledPin(Value, Name, FriendlyName == Name ? FString() : FriendlyName));
+		FUEmkaShimParam& Shim = Sig.ShimParams.AddDefaulted_GetRef();
+		Shim.Name = Name;
+		Shim.TypeText = Value.TypeName;
+		return Name;
+	};
 	for (const FUEmkaCompiledValue& Param : Compiled.Params)
 	{
 		if (!Param.bSupported || (Param.bIsStruct && Param.Fields.IsEmpty()))
@@ -457,47 +478,65 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 			Sig.UnsupportedReason = FString::Printf(TEXT("parameter '%s' has a type that cannot cross Blueprint pins"), *Param.Name);
 			break;
 		}
-		FUEmkaShimParam& Shim = Sig.ShimParams.AddDefaulted_GetRef();
-		Shim.Name = Param.Name;
-		Shim.TypeText = Param.TypeName;
-		if (Param.bIsStruct)
-		{
-			Sig.bNeedsShim = true;
-			Shim.StructName = Param.TypeName;
-			for (const FUEmkaCompiledValue& Field : Param.Fields)
-			{
-				Shim.Fields.Add({Field.Name, Field.TypeName});
-				Sig.Params.Add(MakeCompiledPin(Field, Param.Name + TEXT("_") + Field.Name, Param.Name + TEXT(".") + Field.Name));
-			}
-		}
-		else
-		{
-			Sig.Params.Add(MakeCompiledPin(Param, Param.Name));
-		}
+		Sig.ShimCallArgs.Add(FlattenInput(Param, Param.Name, Param.Name));
 	}
 
 	const FUEmkaCompiledValue& Result = Compiled.Result;
+	Sig.CompiledReturn = Result;
 	if (!Result.bSupported || (Result.bIsStruct && Result.Fields.IsEmpty()))
 	{
 		Sig.UnsupportedReason = TEXT("return value has a type that cannot cross Blueprint pins");
 	}
 	else if (Result.bIsStruct || Result.bIsTuple)
 	{
-		Sig.ReturnTypeText = Result.TypeName;
+		TArray<FString> ReturnExpressions;
+		TArray<FString> ReturnTypes;
+		TFunction<void(const FUEmkaCompiledValue&, const FString&, const FString&, const FString&)> FlattenResult;
+		FlattenResult = [&Sig, &ReturnExpressions, &ReturnTypes, &FlattenResult](const FUEmkaCompiledValue& Value, const FString& Name, const FString& Friendly, const FString& Expression)
+		{
+			if (Value.bIsStruct)
+			{
+				Sig.bNeedsShim = true;
+				for (const FUEmkaCompiledValue& Field : Value.Fields)
+				{
+					FlattenResult(Field, Name.IsEmpty() ? Field.Name : Name + TEXT("_") + Field.Name,
+						Friendly.IsEmpty() ? Field.Name : Friendly + TEXT(".") + Field.Name, Expression + TEXT(".") + Field.Name);
+				}
+				return;
+			}
+			Sig.ReturnParams.Add(MakeCompiledPin(Value, Name, Friendly));
+			ReturnTypes.Add(Value.TypeName);
+			ReturnExpressions.Add(Expression);
+		};
+		FString Assignment;
+		TSet<FString> UsedNames;
+		for (const FUEmkaPinDef& Pin : Sig.Params) UsedNames.Add(Pin.Name);
+		auto MakeResultName = [&UsedNames](FString Name)
+		{
+			while (UsedNames.Contains(Name)) Name += TEXT("_");
+			UsedNames.Add(Name);
+			return Name;
+		};
 		if (Result.bIsStruct)
 		{
-			Sig.bNeedsShim = true;
-			Sig.ReturnStructName = Result.TypeName;
+			const FString Variable = MakeResultName(TEXT("__r"));
+			FlattenResult(Result, TEXT(""), TEXT(""), Variable);
+			Assignment = Variable + TEXT(" := ");
 		}
-		for (int32 Index = 0; Index < Result.Fields.Num(); ++Index)
+		else
 		{
-			const FUEmkaCompiledValue& Field = Result.Fields[Index];
-			Sig.ReturnParams.Add(MakeCompiledPin(Field, Result.bIsStruct ? Field.Name : FString::Printf(TEXT("item%d"), Index), Result.bIsStruct ? Field.Name : FString()));
-			if (Result.bIsStruct)
+			TArray<FString> Variables;
+			for (int32 Index = 0; Index < Result.Fields.Num(); ++Index)
 			{
-				Sig.ReturnFields.Add({Field.Name, Field.TypeName});
+				const FString Variable = MakeResultName(FString::Printf(TEXT("__r%d"), Index));
+				Variables.Add(Variable);
+				FlattenResult(Result.Fields[Index], FString::Printf(TEXT("item%d"), Index),
+					Result.Fields[Index].bIsStruct ? FString::Printf(TEXT("ReturnValue%d"), Index + 1) : FString(), Variable);
 			}
+			Assignment = FString::Join(Variables, TEXT(", ")) + TEXT(" := ");
 		}
+		Sig.ReturnTypeText = ReturnTypes.Num() == 1 ? ReturnTypes[0] : TEXT("(") + FString::Join(ReturnTypes, TEXT(", ")) + TEXT(")");
+		Sig.ShimBody = Assignment + TEXT("$CALL$\n    return ") + FString::Join(ReturnExpressions, TEXT(", "));
 		if (Sig.ReturnParams.Num() == 1)
 		{
 			const FUEmkaPinDef& Pin = Sig.ReturnParams[0];
@@ -505,10 +544,11 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 			Sig.bReturnIsArray = Pin.bIsArray;
 			Sig.bReturnIsStaticArray = Pin.bIsStaticArray;
 			Sig.ReturnEnumTypeName = Pin.EnumTypeName;
+			Sig.CompiledReturn = Pin.CompiledValue;
 			Sig.ReturnParams.Empty();
 		}
 	}
-	else if (Result.Type != EUEmkaValueType::Void)
+	if (!Result.bIsStruct && !Result.bIsTuple && Result.Type != EUEmkaValueType::Void)
 	{
 		Sig.ReturnTypeText = Result.TypeName;
 		Sig.ReturnType = Result.Type;
@@ -516,7 +556,18 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 		Sig.bReturnIsStaticArray = Result.bIsStaticArray;
 		Sig.ReturnEnumTypeName = Result.bIsEnum ? Result.TypeName : FString();
 	}
-
+	TSet<FName> PinNames;
+	PinNames.Add(UEdGraphSchema_K2::PN_Execute);
+	for (const FUEmkaPinDef& Pin : Sig.Params)
+	{
+		if (PinNames.Contains(FName(*Pin.Name))) Sig.UnsupportedReason = TEXT("flattened parameter names overlap");
+		PinNames.Add(FName(*Pin.Name));
+	}
+	const bool bStructuredResult = Sig.ReturnParams.Num() >= 2 || Sig.bReturnIsArray || (Sig.ReturnType.IsSet() && Sig.ReturnType.GetValue() == EUEmkaValueType::Composite);
+	if (Sig.bNeedsShim && Sig.Params.Num() > (bStructuredResult ? 14 : 15))
+	{
+		Sig.UnsupportedReason = TEXT("flattened parameters exceed Umka's function parameter limit");
+	}
 	if (!Sig.UnsupportedReason.IsEmpty())
 	{
 		const FString Reason = Sig.UnsupportedReason;
@@ -1018,11 +1069,17 @@ FString UK2Node_UEmka::BuildShimFunction(const FUEmkaSignature& Sig)
 		}
 	}
 
+	if (!Sig.ShimCallArgs.IsEmpty()) CallArgs = Sig.ShimCallArgs;
 	const FString Call = FString::Printf(TEXT("%s(%s)"), *Sig.FunctionName, *FString::Join(CallArgs, TEXT(", ")));
 
 	FString RetDecl;
 	FString Body;
-	if (!Sig.ReturnStructName.IsEmpty())
+	if (!Sig.ShimBody.IsEmpty())
+	{
+		RetDecl = FString::Printf(TEXT(": %s"), *Sig.ReturnTypeText);
+		Body = TEXT("    ") + Sig.ShimBody.Replace(TEXT("$CALL$"), *Call);
+	}
+	else if (!Sig.ReturnStructName.IsEmpty())
 	{
 		// Struct return: call into a local, then return its fields as a tuple
 		TArray<FString> RetTypes;
@@ -1099,17 +1156,45 @@ void UK2Node_UEmka::AllocateDefaultPins()
 	// Exec in/out
 	CreatePin(EGPD_Input,  UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Execute);
 	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Then);
-
-	// Typed input pins from parsed signature
+	TArray<FEdGraphPinType> InputTypes;
+	TArray<FEdGraphPinType> OutputTypes;
+	auto ResolveType = [this](const FUEmkaCompiledValue& Value, const EUEmkaValueType Type, const bool bIsArray)
+	{
+		FString TypeError;
+		FEdGraphPinType PinType = Value.bSupported ? UEmkaRecordTypes::GetPinType(Value, this, TypeError) : GetPinTypeFor(Type);
+		if (!TypeError.IsEmpty()) ParsedSignature.UnsupportedReason = TypeError;
+		if (bIsArray && !Value.bSupported) PinType.ContainerType = EPinContainerType::Array;
+		return PinType;
+	};
 	for (const FUEmkaPinDef& Param : ParsedSignature.Params)
 	{
-		FEdGraphPinType PinType = GetPinTypeFor(Param.Type);
-		if (Param.bIsArray)
-		{
-			PinType.ContainerType = EPinContainerType::Array;
-		}
+		InputTypes.Add(ResolveType(Param.CompiledValue, Param.Type, Param.bIsArray));
+	}
+	for (const FUEmkaPinDef& Result : ParsedSignature.ReturnParams)
+	{
+		OutputTypes.Add(ResolveType(Result.CompiledValue, Result.Type, Result.bIsArray));
+	}
+	if (ParsedSignature.ReturnType.IsSet())
+	{
+		OutputTypes.Add(ResolveType(ParsedSignature.CompiledReturn, ParsedSignature.ReturnType.GetValue(), ParsedSignature.bReturnIsArray));
+	}
+	if (!ParsedSignature.UnsupportedReason.IsEmpty())
+	{
+		Super::AllocateDefaultPins();
+		return;
+	}
+
+	// Typed input pins from parsed signature
+	for (int32 Index = 0; Index < ParsedSignature.Params.Num(); ++Index)
+	{
+		const FUEmkaPinDef& Param = ParsedSignature.Params[Index];
+		const FEdGraphPinType& PinType = InputTypes[Index];
 		UEdGraphPin* NewPin = CreatePin(EGPD_Input, PinType.PinCategory, FName(*Param.Name));
 		NewPin->PinType = PinType;
+		if (Param.CompiledValue.bHasDefault && Param.CompiledValue.DefaultCompositeValue.IsEmpty())
+		{
+			GetDefault<UEdGraphSchema_K2>()->SetPinAutogeneratedDefaultValue(NewPin, Param.CompiledValue.DefaultValue);
+		}
 		if (!Param.FriendlyName.IsEmpty())
 		{
 			NewPin->PinFriendlyName = FText::FromString(Param.FriendlyName);
@@ -1127,11 +1212,7 @@ void UK2Node_UEmka::AllocateDefaultPins()
 		for (int32 i = 0; i < ParsedSignature.ReturnParams.Num(); ++i)
 		{
 			const FUEmkaPinDef& Def = ParsedSignature.ReturnParams[i];
-			FEdGraphPinType PinType = GetPinTypeFor(Def.Type);
-			if (Def.bIsArray)
-			{
-				PinType.ContainerType = EPinContainerType::Array;
-			}
+			const FEdGraphPinType& PinType = OutputTypes[i];
 			FName PinName = *FString::Printf(TEXT("ReturnValue%d"), i + 1);
 			UEdGraphPin* RetPin = CreatePin(EGPD_Output, PinType.PinCategory, PinName);
 			RetPin->PinType = PinType;
@@ -1147,11 +1228,7 @@ void UK2Node_UEmka::AllocateDefaultPins()
 	}
 	else if (ParsedSignature.bValid && ParsedSignature.ReturnType.IsSet())
 	{
-		FEdGraphPinType RetPinType = GetPinTypeFor(ParsedSignature.ReturnType.GetValue());
-		if (ParsedSignature.bReturnIsArray)
-		{
-			RetPinType.ContainerType = EPinContainerType::Array;
-		}
+		const FEdGraphPinType& RetPinType = OutputTypes[0];
 		UEdGraphPin* RetPin = CreatePin(EGPD_Output, RetPinType.PinCategory, PIN_ReturnValue);
 		RetPin->PinType = RetPinType;
 		if (!ParsedSignature.ReturnEnumTypeName.IsEmpty())
@@ -1160,7 +1237,7 @@ void UK2Node_UEmka::AllocateDefaultPins()
 		}
 	}
 
-Super::AllocateDefaultPins();
+	Super::AllocateDefaultPins();
 }
 
 FText UK2Node_UEmka::GetNodeTitle(ENodeTitleType::Type TitleType) const
@@ -1459,7 +1536,10 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 			const FUEmkaPinDef& Param = ParsedSignature.Params[i];
 
 			// Choose the typed helper - array vs scalar, CallFunction avoids MakeStruct validation warnings
-			const FName MakeFuncName = GetMakeParamFuncName(Param.Type, Param.bIsArray);
+			UEdGraphPin* InputPin = FindPin(FName(*Param.Name), EGPD_Input);
+			const bool bCompositeDefault = InputPin && InputPin->LinkedTo.IsEmpty() && Param.CompiledValue.bHasDefault && !Param.CompiledValue.DefaultCompositeValue.IsEmpty();
+			const FName MakeFuncName = bCompositeDefault ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeCompositeDefaultParam)
+				: (Param.Type == EUEmkaValueType::Composite ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeCompositeParam) : GetMakeParamFuncName(Param.Type, Param.bIsArray));
 
 			UK2Node_CallFunction* MakeParamNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
 			MakeParamNode->FunctionReference.SetExternalMember(MakeFuncName, UUEmkaFunctionLibrary::StaticClass());
@@ -1476,11 +1556,18 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 			}
 
 			// Connect our input pin -> helper Values/Value pin
-			if (UEdGraphPin* InputPin = FindPin(FName(*Param.Name), EGPD_Input))
+			if (bCompositeDefault)
 			{
-				const FName ValuePinName = Param.bIsArray ? TEXT("Values") : TEXT("Value");
+				const TArray<uint8>& Bytes = Param.CompiledValue.DefaultCompositeValue;
+				MakeParamNode->FindPinChecked(TEXT("Value"))->DefaultValue = BytesToHex(Bytes.GetData(), Bytes.Num());
+				MakeParamNode->FindPinChecked(TEXT("bIsArray"))->DefaultValue = Param.bIsArray ? TEXT("true") : TEXT("false");
+			}
+			else if (InputPin)
+			{
+				const FName ValuePinName = Param.bIsArray && Param.Type != EUEmkaValueType::Composite ? TEXT("Values") : TEXT("Value");
 				if (UEdGraphPin* ValuePin = MakeParamNode->FindPin(ValuePinName))
 				{
+					if (Param.Type == EUEmkaValueType::Composite) ValuePin->PinType = InputPin->PinType;
 					CompilerContext.MovePinLinksToIntermediate(*InputPin, *ValuePin);
 				}
 			}
@@ -1541,7 +1628,8 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 
 			// GetXxxResult(FUEmkaScriptParam) -> typed value -> output pin
 			UK2Node_CallFunction* GetResultNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
-			GetResultNode->FunctionReference.SetExternalMember(GetGetResultFuncName(Def.Type, Def.bIsArray), UUEmkaFunctionLibrary::StaticClass());
+			GetResultNode->FunctionReference.SetExternalMember(Def.Type == EUEmkaValueType::Composite
+				? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetCompositeResult) : GetGetResultFuncName(Def.Type, Def.bIsArray), UUEmkaFunctionLibrary::StaticClass());
 			GetResultNode->AllocateDefaultPins();
 
 			if (UEdGraphPin* GetAtOut = GetAtNode->FindPin(TEXT("ReturnValue"), EGPD_Output))
@@ -1554,8 +1642,9 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 
 			FName OutputPinName = *FString::Printf(TEXT("ReturnValue%d"), i + 1);
 			UEdGraphPin* OutputPin = FindPin(OutputPinName, EGPD_Output);
-			if (UEdGraphPin* GetOutPin = GetResultNode->FindPin(TEXT("ReturnValue"), EGPD_Output))
+			if (UEdGraphPin* GetOutPin = GetResultNode->FindPin(Def.Type == EUEmkaValueType::Composite ? TEXT("Value") : TEXT("ReturnValue"), EGPD_Output))
 			{
+				if (OutputPin && Def.Type == EUEmkaValueType::Composite) GetOutPin->PinType = OutputPin->PinType;
 				if (OutputPin) CompilerContext.MovePinLinksToIntermediate(*OutputPin, *GetOutPin);
 			}
 		}
@@ -1563,7 +1652,9 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 	else if (ParsedSignature.ReturnType.IsSet())
 	{
 		UK2Node_CallFunction* GetResultNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
-		GetResultNode->FunctionReference.SetExternalMember(GetGetResultFuncName(ParsedSignature.ReturnType.GetValue(), ParsedSignature.bReturnIsArray), UUEmkaFunctionLibrary::StaticClass());
+		const bool bComposite = ParsedSignature.ReturnType.GetValue() == EUEmkaValueType::Composite;
+		GetResultNode->FunctionReference.SetExternalMember(bComposite ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetCompositeResult)
+			: GetGetResultFuncName(ParsedSignature.ReturnType.GetValue(), ParsedSignature.bReturnIsArray), UUEmkaFunctionLibrary::StaticClass());
 		GetResultNode->AllocateDefaultPins();
 
 		// RunUmkaInline Result out -> GetResult input
@@ -1575,8 +1666,9 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 
 		// GetResult ReturnValue -> our typed output pin
 		UEdGraphPin* OutputPin = FindPin(PIN_ReturnValue, EGPD_Output);
-		if (UEdGraphPin* GetOutPin = GetResultNode->FindPin(TEXT("ReturnValue"), EGPD_Output))
+		if (UEdGraphPin* GetOutPin = GetResultNode->FindPin(bComposite ? TEXT("Value") : TEXT("ReturnValue"), EGPD_Output))
 		{
+			if (OutputPin && bComposite) GetOutPin->PinType = OutputPin->PinType;
 			if (OutputPin) CompilerContext.MovePinLinksToIntermediate(*OutputPin, *GetOutPin);
 		}
 	}

@@ -85,7 +85,7 @@ Enum arrays use the same base mapping: `[]Direction` maps to an Array of Integer
 
 Integer inputs outside the compiled Umka type's range fail with a runtime error instead of truncating. `uint32` uses Integer64 to represent `0..4294967295`. Since Blueprint has no unsigned 64-bit pin, `uint` preserves all 64 bits in Integer64: negative pin values represent the unsigned upper half.
 
-Valid scripts resolve type aliases through the Umka compiler. Aliases of supported scalars, enums, scalar arrays, and flat structs use the same pins as their underlying types. Unknown types and aliases of unsupported shapes produce compile errors. During incomplete edits, a source-based preview remains available for explicitly declared supported types.
+Valid scripts resolve type aliases through the Umka compiler. Aliases of supported scalars, enums, arrays, structs, and maps use the same pins as their underlying types. Unknown types and aliases of unsupported shapes produce compile errors. During incomplete edits, a source-based preview remains available for explicitly declared supported types.
 
 Raw strings enclosed in backticks can span lines. Their contents, including quotes, comment markers, and backslashes, remain literal and do not affect function discovery or syntax highlighting.
 
@@ -130,11 +130,15 @@ fn splitEven*(nums: []int): ([]int, []int) {
 
 This generates `ReturnValue1`: Array of Integer64 and `ReturnValue2`: Array of Integer64.
 
-A single-element list like `(int)` is treated the same as a plain `int` return.
+A single-element list like `(int)` is treated the same as a plain `int` return. Structs in a return tuple are recursively flattened into fields in declaration order; arrays and maps remain single output pins.
+
+### Default parameters
+
+Unconnected inputs use the defaults evaluated by the Umka compiler, including constant expressions, enums, strings, arrays, and supported structs. Scalar defaults appear directly on the pins. Defaults for struct parameters apply to their flattened fields. Connecting an input or editing a scalar pin's default overrides the script default.
 
 ### Arrays
 
-Prefix any supported scalar type with `[]` or `[N]` to get an array pin. Dynamic (`[]type`) and fixed-size (`[N]type`) arrays both appear as Blueprint arrays, but retain their native Umka ABI. A fixed-size input must contain exactly `N` elements; otherwise execution fails with an error reporting the required and supplied lengths. Constant expressions in `[N]` are supported because the final length is read from the compiled Umka type.
+Prefix any supported scalar or struct type with `[]` or `[N]` to get an array pin. Dynamic (`[]type`) and fixed-size (`[N]type`) arrays both appear as Blueprint arrays, but retain their native Umka ABI. A fixed-size input must contain exactly `N` elements; otherwise execution fails with an error reporting the required and supplied lengths. Constant expressions in `[N]` are supported because the final length is read from the compiled Umka type.
 
 ```
 fn double*(nums: []int): []int {
@@ -159,6 +163,7 @@ fn double*(nums: []int): []int {
 | `[]real32`      | Array of Float      |
 | `[]str`         | Array of String     |
 | `[]MyEnum` (user-defined enum) | Array for its integer base |
+| `[]MyStruct` | Array of generated Blueprint structs |
 
 The same pin mapping applies to fixed-size forms such as `[4]int` and `[Count]real`. Fixed-size return values are copied from Umka's inline array storage back into the Blueprint array.
 
@@ -178,11 +183,29 @@ This generates input pins `p.x`, `p.y`, `d.x`, `d.y` (Double), `scale` (Double),
 
 Under the hood the node compiles a small wrapper function with a flat signature that packs the pins into struct values, calls your function, and unpacks the result. Your script is unchanged.
 
+Fields may contain supported scalars, arrays, scalar maps, and nested structs. Nested struct fields are recursively flattened, so a field such as `p.position.x` becomes a scalar pin while `p.samples` remains an array pin.
+
+Struct arrays use native Blueprint struct arrays. Their element types are generated from the compiled field layout and saved with the owning Blueprint package. Fields in these native structs can include nested structs, arrays, and scalar maps. Identical field layouts share a generated type within the package.
+
 **Constraints:**
-- Field types must be scalars: numbers, `bool`, `char`, `str`, or enums. Structs containing arrays, maps, nested structs, pointers, or function types cannot cross the pin boundary (they still work freely inside the script)
-- Struct arrays (`[]Vec2`) cannot be passed as pins
-- Structs inside a multi-return tuple (`fn f*(): (Vec2, int)`) are not supported - return the struct alone instead
+- Native Blueprint struct field names must be unique without regard to case
+- Flattened input pin names must be unique without regard to case
+- The input name `execute` is reserved for Blueprint execution
+- A generated wrapper supports up to 15 flattened inputs, or 14 when returning arrays, maps, or multiple values
 - The identifier `__uemka_call` is reserved for the generated wrapper
+
+### Maps
+
+`map[K]V` becomes a native Blueprint Map pin. Keys can be any supported integer type, a named enum, or `str`; values can be any supported scalar or named enum. Integer ranges follow the same rules as scalar pins.
+
+```
+fn increment*(counts: map[str]int): map[str]int {
+    counts["calls"]++
+    return counts
+}
+```
+
+Maps are also supported in struct fields and return tuples. Maps with struct or container values, and maps with floating-point keys, cannot cross Blueprint pins.
 
 ### Example - Fibonacci
 
@@ -236,17 +259,19 @@ Captured output is limited to at most 64 KB per execution; the operating system'
 
 The following Umka features are not currently supported as Blueprint pins:
 
-- **Structs with complex fields** - structs containing arrays, maps, nested structs, pointers, or function types (scalar-field structs are flattened into pins, see [Structs](#structs))
-- **Struct arrays** - `[]Vec2` cannot be passed as pins
-- **Structs in multi-return tuples** - `fn f*(): (Vec2, int)` is not supported
-- **Maps** - `map[K]V` types are not supported
+- **Directly nested containers** - `[][]int`, arrays of maps, and maps with container or struct values; a struct may contain supported arrays and maps
+- **Unsupported map keys** - floating-point, struct, and container keys
+- **Structs with unsupported fields** - pointers, interfaces, or function types
 - **Closures / function types** - `fn(int): int` cannot be passed as a pin
 - **Pointers** - `^type` and `weak ^type` are not supported
 - **Pointers inside multi-return** - `fn foo*(): (^int, str)` is not supported
-- **Aliases of unsupported types** - resolving an alias does not make maps, pointers, nested structs, or other unsupported shapes eligible for pins
+- **Interfaces** - `any` and other interface types cannot be passed as pins
+- **Aliases of unsupported types** - resolving an alias does not make an unsupported shape eligible for pins
 - **Unknown or undeclared types** - the Umka compiler must resolve exported signature types
 
 All of the above can still be used freely **inside** your script as local variables, helper types, and intermediate values - the restriction applies only to the exported function's signature (its parameters and return type).
+
+Composite values are limited to 16 nesting levels, 65,536 items per container, 262,144 total values, and 64 MiB of serialized data per value.
 
 ```
 type Vec2 = struct { x, y: real }   // struct as a local type - fine
@@ -261,6 +286,6 @@ fn length*(x: real, y: real): real {
 
 Run the `UEmka` group in Unreal Editor's Automation window, or launch the editor with `-unattended -nullrhi -nosound -ExecCmds="Automation RunTests UEmka;Quit"`.
 
-The suite covers every supported scalar type and enum integer base, aliases, dynamic and fixed arrays, empty dynamic arrays, integer boundaries, Unicode strings, mixed tuples, flat structs, and generated struct wrappers. Blueprint tests compile and execute all type and array mappings through connected input and output pins. Additional tests cover rejected signatures, runtime failures and output resets, logging and concurrent capture, graph reconstruction, transaction undo/redo, package save/load, embedded editor input, and syntax highlighting.
+The suite covers every supported scalar type and enum integer base, aliases, dynamic and fixed arrays, empty containers, integer boundaries, Unicode strings, compiler-evaluated defaults, nested structs, mixed tuples, native scalar maps, and native struct arrays. Blueprint tests compile and execute supported mappings through connected input and output pins. Additional tests cover malformed composite data, rejected signatures, runtime failures and output resets, logging and concurrent capture, graph reconstruction, transaction undo/redo, compiled Blueprint and native struct package save/load, embedded editor input, and syntax highlighting.
 
 These are integration and regression tests for the plugin's supported interfaces, rather than exhaustive tests of the Umka language or a measured line-coverage guarantee. Platform-specific logging behavior still needs validation on each supported platform.

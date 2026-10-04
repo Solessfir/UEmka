@@ -74,6 +74,11 @@ static void compilerSetAPI(Umka *umka)
     umka->api.umkaIsEnumType        = umkaIsEnumType;
     umka->api.umkaIsExprListType    = umkaIsExprListType;
     umka->api.umkaGetFieldNameByIndex = umkaGetFieldNameByIndex;
+    umka->api.umkaGetFuncParamDefaultValue = umkaGetFuncParamDefaultValue;
+    umka->api.umkaMakeMap           = umkaMakeMap;
+    umka->api.umkaEnsureMapItem     = umkaEnsureMapItem;
+    umka->api.umkaGetMapLen         = umkaGetMapLen;
+    umka->api.umkaVisitMap          = umkaVisitMap;
 }
 
 

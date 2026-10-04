@@ -10,10 +10,18 @@ License: BSD-2-Clause, retained in [LICENSE](LICENSE).
 
 The release's `src/umka_*.c` and `src/umka_*.h` files are compiled directly by UnrealBuildTool. The standalone CLI, `src/umka.c`, is excluded. `umka_api.h` lives in `Public`; the other source files live in `Private`. Source line endings are normalized to LF.
 
-Local integration additions are confined to three upstream files:
+Local integration additions are confined to five upstream files:
 
-- `Public/umka_api.h`: 17 metadata API typedefs, declarations, and entries appended to `UmkaAPI`.
-- `Private/umka_api.c`: a direct API-header include and metadata implementations for array shapes, sizes, struct fields, function signatures, enum bases, and declared type names.
-- `Private/umka_compiler.c`: initialization of those 17 appended API entries.
+- `Public/umka_api.h`: 22 API typedefs, declarations, and entries appended to `UmkaAPI`, plus the map visitor callback typedef.
+- `Private/umka_api.c`: a direct API-header include, metadata implementations for array shapes, sizes, struct fields, function signatures and defaults, enum bases, and declared type names, plus map construction, insertion, length, and traversal APIs. VM call/run error paths restore error-jumper nesting so a failed call cannot leave a stale native error target.
+- `Private/umka_compiler.c`: initialization of those 22 appended API entries.
+- `Private/umka_vm.h`: declarations for two native map allocation/insertion wrappers.
+- `Private/umka_vm.c`: those wrappers and extraction of the existing map-index insertion body into a shared helper. Script indexing retains its existing allocation and reference-count behavior.
 
-`UmkaLib.Build.cs` and `Private/UmkaLibModule.cpp` are Unreal integration files. Future updates should replace the full upstream source set and license, then reapply the three API additions and validate editor and runtime builds plus the UEmka automation tests. Keep existing upstream API entries in order.
+Function default values use the same zero-based parameter indices as the signature metadata APIs, excluding the hidden upvalue/receiver and structured result parameters. `umkaGetFuncParamDefaultValue` returns false for required parameters and invalid arguments. Scalar values use the stack-slot representation, including `realVal` for `real32`; structured values use `ptrVal`. Returned pointers belong to compiler storage, remain valid until `umkaFree`, and must not be released or mutated by callers.
+
+Pass a zero-initialized map or an existing valid map to `umkaMakeMap`. It replaces the existing map and allocates an empty native map of the supplied type. `umkaEnsureMapItem` creates a missing key with a zero-initialized value and returns writable value storage; the existing `umkaGetMapItem` remains lookup-only. Insertion retains reference-counted keys. Callers must retain reference-counted values they store and release replaced values, as with other native Umka containers. Invalid arguments and dead VMs return without allocation. Outside a running VM call, runtime allocation/insertion errors are caught and reported through `umkaGetError`; insertion returns null on failure.
+
+`umkaGetMapLen` returns zero for null or empty maps and -1 for an invalid populated map. `umkaVisitMap` traverses entries once in key order with a heap-backed traversal stack, borrowing stack-slot keys and value pointers without retaining them. The visitor must not mutate the map and may return false to stop traversal. The API returns true when traversal completes, including an empty map, and false for invalid arguments, unsupported key decoding, traversal allocation failure, or an early stop.
+
+`UmkaLib.Build.cs` and `Private/UmkaLibModule.cpp` are Unreal integration files. Future updates should replace the full upstream source set and license, then reapply the five API additions and validate editor and runtime builds plus the UEmka automation tests. Keep existing upstream API entries in order.

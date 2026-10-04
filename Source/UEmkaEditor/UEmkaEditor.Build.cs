@@ -18,6 +18,7 @@ public class UEmkaEditor : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"UmkaLib",
 			"UnrealEd",
 			"BlueprintGraph",
 			"GraphEditor",

@@ -102,32 +102,38 @@ UMKA_API bool umkaCompile(Umka *umka)
 
 UMKA_API int umkaRun(Umka *umka)
 {
-    if (setjmp(umka->error.jumper) == 0)
+    const int previousNesting = umka->error.jumperNesting;
+    jmp_buf dummyJumper;
+    jmp_buf *jumper = previousNesting == 0 ? &umka->error.jumper : &dummyJumper;
+    if (setjmp(*jumper) == 0)
     {
         umka->error.jumperNesting++;
         compilerRun(umka);
-        umka->error.jumperNesting--;
+        umka->error.jumperNesting = previousNesting;
         return 0;
     }
 
+    umka->error.jumperNesting = previousNesting;
     return umka->error.report.code;
 }
 
 
 UMKA_API int umkaCall(Umka *umka, UmkaFuncContext *fn)
 {
+    const int previousNesting = umka->error.jumperNesting;
     // Nested calls to umkaCall() should not reset the error jumper
     jmp_buf dummyJumper;
-    jmp_buf *jumper = umka->error.jumperNesting == 0 ? &umka->error.jumper : &dummyJumper;
+    jmp_buf *jumper = previousNesting == 0 ? &umka->error.jumper : &dummyJumper;
 
     if (setjmp(*jumper) == 0)
     {
         umka->error.jumperNesting++;
         compilerCall(umka, fn);
-        umka->error.jumperNesting--;
+        umka->error.jumperNesting = previousNesting;
         return 0;
     }
 
+    umka->error.jumperNesting = previousNesting;
     return umka->error.report.code;
 }
 
@@ -511,6 +517,153 @@ UMKA_API const char *umkaGetFieldNameByIndex(const UmkaType *structType, int ind
     if (!structType || structType->kind != TYPE_STRUCT || index < 0 || index >= structType->numItems)
         return NULL;
     return structType->field[index]->name;
+}
+
+
+UMKA_API bool umkaGetFuncParamDefaultValue(const UmkaType *fnType, int index, UmkaStackSlot *value)
+{
+    const int count = getFuncParamCount(fnType);
+    if (!value || index < 0 || index >= count || index < count - fnType->sig->numDefaultParams)
+        return false;
+
+    memcpy(value, &fnType->sig->param[index + 1]->defaultVal, sizeof(*value));
+    return true;
+}
+
+
+static void nativeMapRuntimeError(Umka *umka, int code, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    // Outside a VM call, the fiber instruction pointer may already be past its debug information.
+    errorReportInit(&umka->error.report, &umka->storage, umka->lex.fileName, "<native map API>", 0, 0, code, format, args);
+    vmKill(&umka->vm);
+    va_end(args);
+    longjmp(umka->error.jumper, 1);
+}
+
+
+UMKA_API void umkaMakeMap(Umka *umka, UmkaMap *map, const UmkaType *type)
+{
+    if (!umka || !map || !type || type->kind != TYPE_MAP ||
+        (map->root && (!map->type || map->type->kind != TYPE_MAP)) || !umkaAlive(umka))
+        return;
+
+    const bool ownsJumper = umka->error.jumperNesting == 0;
+    void (*runtimeHandler)(Umka *, int, const char *, ...) = umka->error.runtimeHandler;
+    if (ownsJumper && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->error.runtimeHandler = runtimeHandler;
+        return;
+    }
+
+    if (ownsJumper)
+    {
+        umka->error.jumperNesting++;
+        umka->error.runtimeHandler = nativeMapRuntimeError;
+    }
+    vmMakeMap(&umka->vm, (Map *)map, type);
+    if (ownsJumper)
+    {
+        umka->error.jumperNesting--;
+        umka->error.runtimeHandler = runtimeHandler;
+    }
+}
+
+
+UMKA_API void *umkaEnsureMapItem(Umka *umka, UmkaMap *map, UmkaStackSlot key)
+{
+    if (!umka || !map || !map->type || map->type->kind != TYPE_MAP || !umkaAlive(umka))
+        return NULL;
+
+    const bool ownsJumper = umka->error.jumperNesting == 0;
+    void (*runtimeHandler)(Umka *, int, const char *, ...) = umka->error.runtimeHandler;
+    if (ownsJumper && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->error.runtimeHandler = runtimeHandler;
+        return NULL;
+    }
+
+    Slot keySlot;
+    memcpy(&keySlot, &key, sizeof(keySlot));
+    if (ownsJumper)
+    {
+        umka->error.jumperNesting++;
+        umka->error.runtimeHandler = nativeMapRuntimeError;
+    }
+    void *value = vmEnsureMapNodeData(&umka->vm, (Map *)map, keySlot);
+    if (ownsJumper)
+    {
+        umka->error.jumperNesting--;
+        umka->error.runtimeHandler = runtimeHandler;
+    }
+    return value;
+}
+
+
+UMKA_API int umkaGetMapLen(const UmkaMap *map)
+{
+    if (!map || !map->root)
+        return 0;
+    if (!map->type || map->type->kind != TYPE_MAP)
+        return -1;
+    return map->root->len;
+}
+
+
+UMKA_API bool umkaVisitMap(const UmkaMap *map, UmkaMapVisitor visitor, void *user)
+{
+    if (!map || !visitor)
+        return false;
+    if (!map->root)
+        return true;
+    if (!map->type || map->type->kind != TYPE_MAP)
+        return false;
+
+    const Type *keyType = typeMapKey(map->type);
+    const MapNode *node = map->root;
+    const MapNode **stack = NULL;
+    size_t count = 0, capacity = 0;
+    bool complete = false;
+    while (node || count)
+    {
+        while (node)
+        {
+            if (count == capacity)
+            {
+                if (capacity > SIZE_MAX / sizeof(*stack) / 2)
+                    goto cleanup;
+                const size_t newCapacity = capacity ? capacity * 2 : 64;
+                const MapNode **newStack = realloc(stack, newCapacity * sizeof(*stack));
+                if (!newStack)
+                    goto cleanup;
+                stack = newStack;
+                capacity = newCapacity;
+            }
+            stack[count++] = node;
+            node = node->left;
+        }
+
+        node = stack[--count];
+        if (node->key && node->data)
+        {
+            Const key = {.ptrVal = node->key};
+            if (!constDeref(NULL, &key, keyType->kind))
+                goto cleanup;
+            UmkaStackSlot keySlot;
+            memcpy(&keySlot, &key, sizeof(keySlot));
+            if (!visitor(keySlot, node->data, user))
+                goto cleanup;
+        }
+        node = node->right;
+    }
+    complete = true;
+
+cleanup:
+    free(stack);
+    return complete;
 }
 
 

@@ -176,6 +176,12 @@ typedef const char *(*UmkaGetTypeName)         (const UmkaType *type);
 typedef bool (*UmkaIsEnumType)                 (const UmkaType *type);
 typedef bool (*UmkaIsExprListType)             (const UmkaType *type);
 typedef const char *(*UmkaGetFieldNameByIndex) (const UmkaType *structType, int index);
+typedef bool (*UmkaGetFuncParamDefaultValue)   (const UmkaType *fnType, int index, UmkaStackSlot *value);
+typedef void (*UmkaMakeMap)                    (Umka *umka, UmkaMap *map, const UmkaType *type);
+typedef void *(*UmkaEnsureMapItem)             (Umka *umka, UmkaMap *map, UmkaStackSlot key);
+typedef int (*UmkaGetMapLen)                   (const UmkaMap *map);
+typedef bool (*UmkaMapVisitor)                 (UmkaStackSlot key, const void *value, void *user);
+typedef bool (*UmkaVisitMap)                   (const UmkaMap *map, UmkaMapVisitor visitor, void *user);
 
 
 typedef struct
@@ -235,6 +241,11 @@ typedef struct
     UmkaIsEnumType      umkaIsEnumType;
     UmkaIsExprListType  umkaIsExprListType;
     UmkaGetFieldNameByIndex umkaGetFieldNameByIndex;
+    UmkaGetFuncParamDefaultValue umkaGetFuncParamDefaultValue;
+    UmkaMakeMap         umkaMakeMap;
+    UmkaEnsureMapItem   umkaEnsureMapItem;
+    UmkaGetMapLen       umkaGetMapLen;
+    UmkaVisitMap        umkaVisitMap;
 } UmkaAPI;
 
 
@@ -293,6 +304,13 @@ UMKA_API const char *umkaGetTypeName        (const UmkaType *type);
 UMKA_API bool umkaIsEnumType                (const UmkaType *type);
 UMKA_API bool umkaIsExprListType            (const UmkaType *type);
 UMKA_API const char *umkaGetFieldNameByIndex(const UmkaType *structType, int index);
+// Default pointers belong to compiler storage and remain valid until umkaFree().
+UMKA_API bool umkaGetFuncParamDefaultValue (const UmkaType *fnType, int index, UmkaStackSlot *value);
+UMKA_API void umkaMakeMap                   (Umka *umka, UmkaMap *map, const UmkaType *type);
+UMKA_API void *umkaEnsureMapItem            (Umka *umka, UmkaMap *map, UmkaStackSlot key);
+UMKA_API int umkaGetMapLen                  (const UmkaMap *map);
+// Visitors borrow keys and values and must not modify the map during traversal.
+UMKA_API bool umkaVisitMap                  (const UmkaMap *map, UmkaMapVisitor visitor, void *user);
 
 
 static inline UmkaAPI *umkaGetAPI(Umka *umka)

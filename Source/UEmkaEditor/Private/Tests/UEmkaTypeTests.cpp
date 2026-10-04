@@ -119,9 +119,9 @@ bool FUEmkaUnsupportedAliasTest::RunTest(const FString& Parameters)
 {
 	for (const TCHAR* Declaration : {
 		TEXT("type Hidden = ^int\ntype Alias = Hidden\n"),
-		TEXT("type Hidden = map[int]int\ntype Alias = Hidden\n"),
+		TEXT("type Hidden = map[int][]int\ntype Alias = Hidden\n"),
 		TEXT("type Hidden = struct { Value: enum { one } }\ntype Alias = Hidden\n"),
-		TEXT("type Inner = struct { Value: int }\ntype Hidden = struct { Value: Inner }\ntype Alias = Hidden\n")})
+		TEXT("type Inner = struct { Value: ^int }\ntype Hidden = struct { Value: Inner }\ntype Alias = Hidden\n")})
 	{
 		const FUEmkaSignature Signature = UK2Node_UEmka::ParseScript(FString(Declaration) + TEXT("fn Test*(Value: Alias) {}"));
 		TestTrue(TEXT("Unsupported alias rejected"), !Signature.bValid || !Signature.UnsupportedReason.IsEmpty());

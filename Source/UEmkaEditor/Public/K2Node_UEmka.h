@@ -25,6 +25,8 @@ struct FUEmkaPinDef
 
 	FString FriendlyName; // optional display override, e.g. "p.x" for flattened struct fields
 
+	FUEmkaCompiledValue CompiledValue;
+
 	bool operator==(const FUEmkaPinDef&) const = default;
 };
 
@@ -94,8 +96,11 @@ struct FUEmkaSignature
 
 	FString ReturnTypeText; // raw return type text for non-struct forwarding, e.g. "(int, str)"
 
-	// Non-empty when the signature uses a construct that can't cross pins ([]StructType,
-	// struct inside multi-return, struct with unsupported field types). No data pins generated.
+	TArray<FString> ShimCallArgs;
+	FString ShimBody;
+	FUEmkaCompiledValue CompiledReturn;
+
+	// Non-empty when a signature cannot be represented by Blueprint pins. No data pins generated.
 	FString UnsupportedReason;
 
 	bool operator==(const FUEmkaSignature&) const = default;

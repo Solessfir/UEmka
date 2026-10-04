@@ -3677,12 +3677,8 @@ static FORCE_INLINE void doGetDynArrayPtr(Fiber *fiber, bool dereference, Error 
 }
 
 
-static FORCE_INLINE void doGetMapPtr(Fiber *fiber, HeapPages *pages, bool dereference, Error *error)
+static FORCE_INLINE void *doEnsureMapNodeData(Map *map, Slot key, const Type *mapType, HeapPages *pages, Error *error)
 {
-    const Slot key = *fiber->top++;
-    Map *map = (fiber->top++)->ptrVal;
-    const Type *mapType = fiber->code[fiber->ip].type;
-
     if (UNLIKELY(!map))
         error->runtimeHandler(error->context, ERR_RUNTIME, "Map is null");
 
@@ -3709,7 +3705,18 @@ static FORCE_INLINE void doGetMapPtr(Fiber *fiber, HeapPages *pages, bool derefe
         map->root->len++;
     }
 
-    (--fiber->top)->ptrVal = node->data;    
+    return node->data;
+}
+
+
+static FORCE_INLINE void doGetMapPtr(Fiber *fiber, HeapPages *pages, bool dereference, Error *error)
+{
+    const Slot key = *fiber->top++;
+    Map *map = (fiber->top++)->ptrVal;
+    const Type *mapType = fiber->code[fiber->ip].type;
+
+    void *data = doEnsureMapNodeData(map, key, mapType, pages, error);
+    (--fiber->top)->ptrVal = data;
 
     if (dereference)
         doDerefImpl(fiber->top, fiber->code[fiber->ip].typeKind, error);    
@@ -4374,6 +4381,21 @@ void *vmGetMapNodeData(VM *vm, Map *map, Slot key)
 
     const MapNode *node = *doGetMapNode(map, key, false, NULL, vm->error);
     return node ? node->data : NULL;
+}
+
+
+void vmMakeMap(VM *vm, Map *map, const Type *type)
+{
+    if (map->root)
+        doRefCntImpl(&vm->pages, map, map->type, TOK_MINUSMINUS);
+    map->root = NULL;
+    doAllocMap(&vm->pages, map, type, vm->error);
+}
+
+
+void *vmEnsureMapNodeData(VM *vm, Map *map, Slot key)
+{
+    return doEnsureMapNodeData(map, key, map->type, &vm->pages, vm->error);
 }
 
 
