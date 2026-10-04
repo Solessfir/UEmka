@@ -31,6 +31,7 @@ static FString MakeUEmkaStructuralView(const FString& Source)
 		LineComment,
 		BlockComment,
 		String,
+		RawString,
 		Char,
 	};
 
@@ -73,6 +74,19 @@ static FString MakeUEmkaStructuralView(const FString& Source)
 				{
 					Mask(i);
 					State = EState::Char;
+				}
+				else if (Ch == TEXT('`'))
+				{
+					Mask(i);
+					State = EState::RawString;
+				}
+				break;
+
+			case EState::RawString:
+				Mask(i);
+				if (Ch == TEXT('`'))
+				{
+					State = EState::Code;
 				}
 				break;
 
@@ -121,7 +135,7 @@ static bool IsUEmkaIdentChar(const TCHAR Ch)
 }
 
 // Parses declared enum storage widths. Unspecified enum bases use Umka's default int (8 bytes).
-static TMap<FString, int32> ParseUEmkaEnumByteSizes(const FString& Source, const FString& StructuralView)
+static TMap<FString, int32> ParseUEmkaEnumByteSizes(const FString& Source, const FString& StructuralView, TMap<FString, FString>& BaseNames)
 {
 	TMap<FString, int32> Result;
 	const int32 Len = StructuralView.Len();
@@ -188,13 +202,16 @@ static TMap<FString, int32> ParseUEmkaEnumByteSizes(const FString& Source, const
 		}
 
 		int32 ByteSize = 8;
+		FString BaseName = TEXT("int");
 		SkipWhitespace(P);
 		if (P < Len && StructuralView[P] == TEXT('('))
 		{
 			++P;
-			ByteSize = ByteSizeForBase(ReadIdent(P));
+			BaseName = ReadIdent(P);
+			ByteSize = ByteSizeForBase(BaseName);
 		}
 		Result.Add(TypeName, ByteSize);
+		BaseNames.Add(TypeName, BaseName);
 		Pos = P;
 	}
 
@@ -231,7 +248,6 @@ FEdGraphPinType UK2Node_UEmka::GetPinTypeFor(EUEmkaValueType ValueType)
 		case EUEmkaValueType::Int16:
 		case EUEmkaValueType::Int32:
 		case EUEmkaValueType::UInt16:
-		case EUEmkaValueType::UInt32:
 			PinType.PinCategory = UEdGraphSchema_K2::PC_Int;
 			break;
 		case EUEmkaValueType::UInt8:
@@ -239,6 +255,7 @@ FEdGraphPinType UK2Node_UEmka::GetPinTypeFor(EUEmkaValueType ValueType)
 			PinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
 			break;
 		case EUEmkaValueType::UInt:
+		case EUEmkaValueType::UInt32:
 			PinType.PinCategory = UEdGraphSchema_K2::PC_Int64; // closest BP has to uint64
 			break;
 		case EUEmkaValueType::Bool:
@@ -408,11 +425,115 @@ TArray<FUEmkaStructDef> UK2Node_UEmka::ParseStructDefs(const FString& InScript, 
 // Signature parser
 // -------------------------------------------------------------------------
 
+static FUEmkaPinDef MakeCompiledPin(const FUEmkaCompiledValue& Value, const FString& Name, const FString& FriendlyName = {})
+{
+	FUEmkaPinDef Pin;
+	Pin.Name = Name;
+	Pin.Type = Value.Type;
+	Pin.bIsArray = Value.bIsArray;
+	Pin.bIsStaticArray = Value.bIsStaticArray;
+	Pin.EnumByteSize = Value.EnumByteSize;
+	Pin.FriendlyName = FriendlyName;
+	if (Value.bIsEnum)
+	{
+		Pin.EnumTypeName = Value.TypeName;
+		if (!Pin.FriendlyName.IsEmpty())
+		{
+			Pin.FriendlyName += FString::Printf(TEXT(" (%s)"), *Value.TypeName);
+		}
+	}
+	return Pin;
+}
+
+static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const FUEmkaCompiledSignature& Compiled)
+{
+	FUEmkaSignature Sig;
+	Sig.FunctionName = FunctionName;
+	Sig.bValid = true;
+	for (const FUEmkaCompiledValue& Param : Compiled.Params)
+	{
+		if (!Param.bSupported || (Param.bIsStruct && Param.Fields.IsEmpty()))
+		{
+			Sig.UnsupportedReason = FString::Printf(TEXT("parameter '%s' has a type that cannot cross Blueprint pins"), *Param.Name);
+			break;
+		}
+		FUEmkaShimParam& Shim = Sig.ShimParams.AddDefaulted_GetRef();
+		Shim.Name = Param.Name;
+		Shim.TypeText = Param.TypeName;
+		if (Param.bIsStruct)
+		{
+			Sig.bNeedsShim = true;
+			Shim.StructName = Param.TypeName;
+			for (const FUEmkaCompiledValue& Field : Param.Fields)
+			{
+				Shim.Fields.Add({Field.Name, Field.TypeName});
+				Sig.Params.Add(MakeCompiledPin(Field, Param.Name + TEXT("_") + Field.Name, Param.Name + TEXT(".") + Field.Name));
+			}
+		}
+		else
+		{
+			Sig.Params.Add(MakeCompiledPin(Param, Param.Name));
+		}
+	}
+
+	const FUEmkaCompiledValue& Result = Compiled.Result;
+	if (!Result.bSupported || (Result.bIsStruct && Result.Fields.IsEmpty()))
+	{
+		Sig.UnsupportedReason = TEXT("return value has a type that cannot cross Blueprint pins");
+	}
+	else if (Result.bIsStruct || Result.bIsTuple)
+	{
+		Sig.ReturnTypeText = Result.TypeName;
+		if (Result.bIsStruct)
+		{
+			Sig.bNeedsShim = true;
+			Sig.ReturnStructName = Result.TypeName;
+		}
+		for (int32 Index = 0; Index < Result.Fields.Num(); ++Index)
+		{
+			const FUEmkaCompiledValue& Field = Result.Fields[Index];
+			Sig.ReturnParams.Add(MakeCompiledPin(Field, Result.bIsStruct ? Field.Name : FString::Printf(TEXT("item%d"), Index), Result.bIsStruct ? Field.Name : FString()));
+			if (Result.bIsStruct)
+			{
+				Sig.ReturnFields.Add({Field.Name, Field.TypeName});
+			}
+		}
+		if (Sig.ReturnParams.Num() == 1)
+		{
+			const FUEmkaPinDef& Pin = Sig.ReturnParams[0];
+			Sig.ReturnType = Pin.Type;
+			Sig.bReturnIsArray = Pin.bIsArray;
+			Sig.bReturnIsStaticArray = Pin.bIsStaticArray;
+			Sig.ReturnEnumTypeName = Pin.EnumTypeName;
+			Sig.ReturnParams.Empty();
+		}
+	}
+	else if (Result.Type != EUEmkaValueType::Void)
+	{
+		Sig.ReturnTypeText = Result.TypeName;
+		Sig.ReturnType = Result.Type;
+		Sig.bReturnIsArray = Result.bIsArray;
+		Sig.bReturnIsStaticArray = Result.bIsStaticArray;
+		Sig.ReturnEnumTypeName = Result.bIsEnum ? Result.TypeName : FString();
+	}
+
+	if (!Sig.UnsupportedReason.IsEmpty())
+	{
+		const FString Reason = Sig.UnsupportedReason;
+		Sig = {};
+		Sig.FunctionName = FunctionName;
+		Sig.bValid = true;
+		Sig.UnsupportedReason = Reason;
+	}
+	return Sig;
+}
+
 FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 {
 	FUEmkaSignature Sig;
 	const FString StructuralScript = MakeUEmkaStructuralView(InScript);
-	const TMap<FString, int32> EnumByteSizes = ParseUEmkaEnumByteSizes(InScript, StructuralScript);
+	TMap<FString, FString> EnumBaseNames;
+	const TMap<FString, int32> EnumByteSizes = ParseUEmkaEnumByteSizes(InScript, StructuralScript, EnumBaseNames);
 
 	const TArray<FUEmkaStructDef> Structs = ParseStructDefs(StructuralScript, EnumByteSizes);
 	auto FindStruct = [&Structs](const FString& TypeName) -> const FUEmkaStructDef*
@@ -475,6 +596,13 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 	}
 
 	if (!bFoundExportedFunction) return Sig;
+
+	// Use compiler-resolved types when available; the source parser keeps previews useful during edits.
+	FUEmkaCompiledSignature Compiled;
+	if (UUEmkaFunctionLibrary::InspectScriptFunction(InScript, FuncName, Compiled))
+	{
+		return MakeCompiledSignature(FuncName, Compiled);
+	}
 
 	// Collect everything inside the parameter parens (handle nested parens)
 	const int32 ParamStart = Pos;
@@ -825,6 +953,24 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 	Sig.FunctionName = FuncName;
 	Sig.bValid = true;
 
+	// Keep declared enum pins stable while a function body is incomplete.
+	auto ResolveEnumBase = [&EnumBaseNames](const FString& Name)
+	{
+		return ParseUmkaType(EnumBaseNames.FindRef(Name)).Get(EUEmkaValueType::Int);
+	};
+	for (FUEmkaPinDef& Param : Sig.Params)
+	{
+		if (Param.Type == EUEmkaValueType::Enum) Param.Type = ResolveEnumBase(Param.EnumTypeName);
+	}
+	for (FUEmkaPinDef& Result : Sig.ReturnParams)
+	{
+		if (Result.Type == EUEmkaValueType::Enum) Result.Type = ResolveEnumBase(Result.EnumTypeName);
+	}
+	if (Sig.ReturnType.IsSet() && Sig.ReturnType.GetValue() == EUEmkaValueType::Enum)
+	{
+		Sig.ReturnType = ResolveEnumBase(Sig.ReturnEnumTypeName);
+	}
+
 	// Unsupported constructs: keep the signature valid (function exists) but expose no data
 	// pins - ValidateNodeDuringCompilation reports UnsupportedReason as a compile error.
 	if (!Sig.UnsupportedReason.IsEmpty())
@@ -969,7 +1115,7 @@ void UK2Node_UEmka::AllocateDefaultPins()
 		{
 			NewPin->PinFriendlyName = FText::FromString(Param.FriendlyName);
 		}
-		else if (Param.Type == EUEmkaValueType::Enum && !Param.EnumTypeName.IsEmpty())
+		else if (!Param.EnumTypeName.IsEmpty())
 		{
 			NewPin->PinFriendlyName = FText::FromString(FString::Printf(TEXT("%s (%s)"), *Param.Name, *Param.EnumTypeName));
 		}
@@ -994,7 +1140,7 @@ void UK2Node_UEmka::AllocateDefaultPins()
 			{
 				RetPin->PinFriendlyName = FText::FromString(Def.FriendlyName);
 			}
-			else if (Def.Type == EUEmkaValueType::Enum && !Def.EnumTypeName.IsEmpty())
+			else if (!Def.EnumTypeName.IsEmpty())
 			{
 				RetPin->PinFriendlyName = FText::FromString(FString::Printf(TEXT("ReturnValue%d (%s)"), i + 1, *Def.EnumTypeName));
 			}
@@ -1009,7 +1155,7 @@ void UK2Node_UEmka::AllocateDefaultPins()
 		}
 		UEdGraphPin* RetPin = CreatePin(EGPD_Output, RetPinType.PinCategory, PIN_ReturnValue);
 		RetPin->PinType = RetPinType;
-		if (ParsedSignature.ReturnType.GetValue() == EUEmkaValueType::Enum && !ParsedSignature.ReturnEnumTypeName.IsEmpty())
+		if (!ParsedSignature.ReturnEnumTypeName.IsEmpty())
 		{
 			RetPin->PinFriendlyName = FText::FromString(ParsedSignature.ReturnEnumTypeName);
 		}
@@ -1165,7 +1311,7 @@ static FName GetMakeParamFuncName(const EUEmkaValueType Type, const bool bIsArra
 		if (Type == EUEmkaValueType::Real)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeRealArrayParam);
 		if (Type == EUEmkaValueType::Real32)							   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeReal32ArrayParam);
 		if (Type == EUEmkaValueType::Str)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrArrayParam);
-		if (Type == EUEmkaValueType::Int || Type == EUEmkaValueType::UInt) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam);
+		if (Type == EUEmkaValueType::Int || Type == EUEmkaValueType::UInt || Type == EUEmkaValueType::UInt32) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeInt64ArrayParam);
 		if (Type == EUEmkaValueType::UInt8
 		 || Type == EUEmkaValueType::Char
 		 || Type == EUEmkaValueType::Enum)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeByteArrayParam);
@@ -1187,7 +1333,7 @@ static FName GetGetResultFuncName(const EUEmkaValueType RetType, const bool bIsA
 		if (RetType == EUEmkaValueType::Real)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetRealArrayResult);
 		if (RetType == EUEmkaValueType::Real32)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetReal32ArrayResult);
 		if (RetType == EUEmkaValueType::Str)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetStrArrayResult);
-		if (RetType == EUEmkaValueType::Int || RetType == EUEmkaValueType::UInt) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetIntArrayResult);
+		if (RetType == EUEmkaValueType::Int || RetType == EUEmkaValueType::UInt || RetType == EUEmkaValueType::UInt32) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetIntArrayResult);
 		if (RetType == EUEmkaValueType::UInt8
 		 || RetType == EUEmkaValueType::Char
 		 || RetType == EUEmkaValueType::Enum)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetByteArrayResult);
@@ -1197,7 +1343,7 @@ static FName GetGetResultFuncName(const EUEmkaValueType RetType, const bool bIsA
 	if (RetType == EUEmkaValueType::Real)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetRealResult);
 	if (RetType == EUEmkaValueType::Real32)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetReal32Result);
 	if (RetType == EUEmkaValueType::Str)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetStrResult);
-	if (RetType == EUEmkaValueType::Int || RetType == EUEmkaValueType::UInt) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetIntResult);
+	if (RetType == EUEmkaValueType::Int || RetType == EUEmkaValueType::UInt || RetType == EUEmkaValueType::UInt32) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetIntResult);
 	return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetInt32Result);
 }
 

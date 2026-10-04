@@ -63,6 +63,16 @@ static void compilerSetAPI(Umka *umka)
     umka->api.umkaGetFieldCount     = umkaGetFieldCount;
     umka->api.umkaGetFieldTypeByIndex = umkaGetFieldTypeByIndex;
     umka->api.umkaGetFieldOffsetByIndex = umkaGetFieldOffsetByIndex;
+    umka->api.umkaGetFuncType       = umkaGetFuncType;
+    umka->api.umkaGetFuncParamCount = umkaGetFuncParamCount;
+    umka->api.umkaGetFuncParamNameByIndex = umkaGetFuncParamNameByIndex;
+    umka->api.umkaGetFuncParamTypeByIndex = umkaGetFuncParamTypeByIndex;
+    umka->api.umkaGetFuncResultType = umkaGetFuncResultType;
+    umka->api.umkaGetTypeKindName   = umkaGetTypeKindName;
+    umka->api.umkaGetTypeName       = umkaGetTypeName;
+    umka->api.umkaIsEnumType        = umkaIsEnumType;
+    umka->api.umkaIsExprListType    = umkaIsExprListType;
+    umka->api.umkaGetFieldNameByIndex = umkaGetFieldNameByIndex;
 }
 
 

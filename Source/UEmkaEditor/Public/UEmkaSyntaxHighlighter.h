@@ -27,6 +27,7 @@ protected:
 		InSingleLineComment,
 		InMultiLineComment,
 		InString,
+		InRawString,
 		InChar,
 	};
 

@@ -17,15 +17,37 @@ enum class EUEmkaValueType : uint8
 	Int32	UMETA(DisplayName = "int32"),	// intVal, PC_Int
 	UInt8	UMETA(DisplayName = "uint8"),	// intVal, PC_Byte
 	UInt16	UMETA(DisplayName = "uint16"),	// intVal, PC_Int
-	UInt32	UMETA(DisplayName = "uint32"),	// intVal, PC_Int
+	UInt32	UMETA(DisplayName = "uint32"),	// intVal, PC_Int64
 	UInt	UMETA(DisplayName = "uint"),	// 64-bit unsigned, uintVal, PC_Int64
 	Bool	UMETA(DisplayName = "bool"),	// intVal, PC_Boolean
 	Char	UMETA(DisplayName = "char"),	// intVal, PC_Byte
 	Real	UMETA(DisplayName = "real"),	// 64-bit float, realVal, PC_Double
 	Real32	UMETA(DisplayName = "real32"),	// 32-bit float, real32Val (param) / realVal (result), PC_Float
 	Str		UMETA(DisplayName = "str"),		// ptrVal (umkaMakeStr), PC_String
-	Enum	UMETA(DisplayName = "enum"),	// user-defined enum type, int64 in Umka, Byte pin in BP
+	Enum	UMETA(DisplayName = "enum"),	// Legacy enum marker; compiled signatures use the underlying integer type
 	Void	UMETA(DisplayName = "void"),	// No return value
+};
+
+struct UEMKA_API FUEmkaCompiledValue
+{
+	FString Name;
+	FString TypeName;
+	EUEmkaValueType Type = EUEmkaValueType::Void;
+	bool bSupported = false;
+	bool bIsArray = false;
+	bool bIsStaticArray = false;
+	bool bIsEnum = false;
+	bool bIsStruct = false;
+	bool bIsTuple = false;
+	int32 ArrayLen = 0;
+	int32 EnumByteSize = 8;
+	TArray<FUEmkaCompiledValue> Fields;
+};
+
+struct UEMKA_API FUEmkaCompiledSignature
+{
+	TArray<FUEmkaCompiledValue> Params;
+	FUEmkaCompiledValue Result;
 };
 
 // Ordered, typed parameter for RunUmkaInline. One element per Umka function parameter.
@@ -102,6 +124,9 @@ public:
 	// Returns false and populates OutError / OutLine (1-based) on failure.
 	static bool CompileCheckScript(const FString& Script, FString& OutError, int32& OutLine);
 
+	// Compile-only signature inspection. Unsupported shapes are reported through bSupported.
+	static bool InspectScriptFunction(const FString& Script, const FString& FunctionName, FUEmkaCompiledSignature& OutSignature);
+
 	// --- Param construction helpers (ExpandNode intermediate graph only) ---
 
 	// Covers: int, int8, int16, int32, uint8, uint16, uint32, uint, char
@@ -122,11 +147,11 @@ public:
 
 	// --- Result extraction helpers (ExpandNode intermediate graph only) ---
 
-	// Covers uint (int64 output pin)
+	// Covers int, uint, and uint32 (int64 output pin)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static int64 GetIntResult(const FUEmkaScriptParam& Result);
 
-	// Covers int, int8..int32, uint8..uint32, bool, char (int32 output pin)
+	// Covers int8..int32, uint8..uint16, bool, char (int32 output pin)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static int32 GetInt32Result(const FUEmkaScriptParam& Result);
 
@@ -142,7 +167,7 @@ public:
 
 	// --- Array param construction helpers (ExpandNode intermediate graph only) ---
 
-	// []int8, []int16, []int32, []uint16, []uint32 - BP pin is TArray<int> (int32)
+	// []int8, []int16, []int32, []uint16 - BP pin is TArray<int> (int32)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeIntArrayParam(const EUEmkaValueType Type, const TArray<int32>& Values, const bool bIsStaticArray);
 
@@ -153,7 +178,7 @@ public:
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeByteArrayParam(const EUEmkaValueType Type, const TArray<uint8>& Values, const bool bIsStaticArray);
 
-	// []uint - BP pin is TArray<int64>
+	// []int, []uint, []uint32 - BP pin is TArray<int64>
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam MakeInt64ArrayParam(const EUEmkaValueType Type, const TArray<int64>& Values, const bool bIsStaticArray);
 
@@ -168,7 +193,7 @@ public:
 
 	// --- Array result extraction helpers (ExpandNode intermediate graph only) ---
 
-	// []int8, []int16, []int32, []uint16, []uint32 - returns TArray<int> (int32)
+	// []int8, []int16, []int32, []uint16 - returns TArray<int> (int32)
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<int32> GetInt32ArrayResult(const FUEmkaScriptParam& Result);
 
@@ -179,7 +204,7 @@ public:
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<uint8> GetByteArrayResult(const FUEmkaScriptParam& Result);
 
-	// []uint - returns TArray<int64>
+	// []int, []uint, []uint32 - returns TArray<int64>
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static TArray<int64> GetIntArrayResult(const FUEmkaScriptParam& Result);
 

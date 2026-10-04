@@ -55,6 +55,7 @@ TSharedRef<FUEmkaSyntaxHighlighter> FUEmkaSyntaxHighlighter::Create()
 	Rules.Emplace(FSyntaxTokenizer::FRule(TEXT("/*")));
 	Rules.Emplace(FSyntaxTokenizer::FRule(TEXT("*/")));
 	Rules.Emplace(FSyntaxTokenizer::FRule(TEXT("\"")));
+	Rules.Emplace(FSyntaxTokenizer::FRule(TEXT("`")));
 	Rules.Emplace(FSyntaxTokenizer::FRule(TEXT("'")));
 
 	// Multi-char operators (longer before shorter to avoid partial matches)
@@ -185,6 +186,14 @@ void FUEmkaSyntaxHighlighter::ClassifyToken(const FString& Source, const FSyntax
 		return;
 	}
 
+	if (State == EParserState::InRawString)
+	{
+		OutInfo.Name = TEXT("UEmka.String");
+		OutStyle = StringStyle;
+		if (TokenText == TEXT("`")) State = EParserState::None;
+		return;
+	}
+
 	// ---- Inside string ----
 	if (State == EParserState::InString)
 	{
@@ -223,6 +232,13 @@ void FUEmkaSyntaxHighlighter::ClassifyToken(const FString& Source, const FSyntax
 		}
 
 		// String / char start
+		if (TokenText == TEXT("`"))
+		{
+			State = EParserState::InRawString;
+			OutInfo.Name = TEXT("UEmka.String");
+			OutStyle = StringStyle;
+			return;
+		}
 		if (TokenText == TEXT("\""))
 		{
 			State = EParserState::InString;

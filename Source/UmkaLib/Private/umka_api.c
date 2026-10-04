@@ -425,6 +425,95 @@ UMKA_API int umkaGetFieldOffsetByIndex(const UmkaType *structType, int index)
 }
 
 
+UMKA_API const UmkaType *umkaGetFuncType(Umka *umka, const char *moduleName, const char *fnName)
+{
+    if (!umka || !fnName)
+        return NULL;
+
+    int module = 1;
+    if (moduleName)
+    {
+        char modulePath[DEFAULT_STR_LEN + 1] = "";
+        moduleAssertRegularizePath(&umka->modules, moduleName, umka->modules.curFolder, modulePath, DEFAULT_STR_LEN + 1);
+        module = moduleFind(&umka->modules, modulePath);
+    }
+
+    const Ident *fnIdent = identFind(&umka->idents, &umka->modules, &umka->blocks, module, fnName, NULL, false);
+    if (!fnIdent || fnIdent->kind != IDENT_CONST || fnIdent->type->kind != TYPE_FN)
+        return NULL;
+    return fnIdent->type;
+}
+
+
+static int getFuncParamCount(const UmkaType *fnType)
+{
+    if (!fnType || fnType->kind != TYPE_FN || !fnType->sig || !fnType->sig->resultType)
+        return -1;
+    const int count = fnType->sig->numParams - 1 - (typeStructured(fnType->sig->resultType) ? 1 : 0);
+    return count >= 0 ? count : -1;
+}
+
+
+UMKA_API int umkaGetFuncParamCount(const UmkaType *fnType)
+{
+    return getFuncParamCount(fnType);
+}
+
+
+UMKA_API const char *umkaGetFuncParamNameByIndex(const UmkaType *fnType, int index)
+{
+    if (index < 0 || index >= getFuncParamCount(fnType))
+        return NULL;
+    return fnType->sig->param[index + 1]->name;
+}
+
+
+UMKA_API const UmkaType *umkaGetFuncParamTypeByIndex(const UmkaType *fnType, int index)
+{
+    if (index < 0 || index >= getFuncParamCount(fnType))
+        return NULL;
+    return fnType->sig->param[index + 1]->type;
+}
+
+
+UMKA_API const UmkaType *umkaGetFuncResultType(const UmkaType *fnType)
+{
+    return fnType && fnType->kind == TYPE_FN && fnType->sig ? fnType->sig->resultType : NULL;
+}
+
+
+UMKA_API const char *umkaGetTypeKindName(const UmkaType *type)
+{
+    return type ? typeKindSpelling(type->kind) : NULL;
+}
+
+
+UMKA_API const char *umkaGetTypeName(const UmkaType *type)
+{
+    return type && type->typeIdent ? type->typeIdent->name : NULL;
+}
+
+
+UMKA_API bool umkaIsEnumType(const UmkaType *type)
+{
+    return type && typeEnum(type);
+}
+
+
+UMKA_API bool umkaIsExprListType(const UmkaType *type)
+{
+    return type && typeExprListStruct(type);
+}
+
+
+UMKA_API const char *umkaGetFieldNameByIndex(const UmkaType *structType, int index)
+{
+    if (!structType || structType->kind != TYPE_STRUCT || index < 0 || index >= structType->numItems)
+        return NULL;
+    return structType->field[index]->name;
+}
+
+
 UMKA_API bool umkaAddClosure(Umka *umka, const char *name, UmkaExternFunc func, void *upvalue)
 {
     return compilerAddClosure(umka, name, func, upvalue);

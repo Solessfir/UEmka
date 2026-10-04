@@ -64,7 +64,7 @@ bool FUEmkaTupleParsingTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Dynamic Boolean type"), Signature.ReturnParams[1].Type, EUEmkaValueType::Bool);
 		TestTrue(TEXT("Dynamic Boolean array"), Signature.ReturnParams[1].bIsArray && !Signature.ReturnParams[1].bIsStaticArray);
 		TestTrue(TEXT("Fixed Boolean array"), Signature.ReturnParams[2].bIsArray && Signature.ReturnParams[2].bIsStaticArray);
-		TestEqual(TEXT("Declared enum type"), Signature.ReturnParams[3].Type, EUEmkaValueType::Enum);
+		TestEqual(TEXT("Declared enum base type"), Signature.ReturnParams[3].Type, EUEmkaValueType::UInt8);
 		TestEqual(TEXT("Enum storage width"), Signature.ReturnParams[3].EnumByteSize, 1);
 	}
 	return true;

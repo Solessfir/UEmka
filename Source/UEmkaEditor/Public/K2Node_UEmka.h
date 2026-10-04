@@ -17,7 +17,7 @@ struct FUEmkaPinDef
 
 	bool bIsStaticArray = false; // true only for fixed-size [N]type arrays
 
-	FString EnumTypeName; // set when Type == EUEmkaValueType::Enum; stores the Umka type identifier
+	FString EnumTypeName; // stores the Umka enum identifier; Type reflects its integer base
 
 	// Storage width of a user-defined enum. Umka permits explicit bases such as enum(uint8).
 	// This is needed to reproduce Umka's struct layout for multi-return values.
@@ -76,7 +76,7 @@ struct FUEmkaSignature
 
 	bool bReturnIsStaticArray = false; // true only for fixed-size [N]type returns
 
-	FString ReturnEnumTypeName; // set when ReturnType == EUEmkaValueType::Enum
+	FString ReturnEnumTypeName; // stores the Umka enum identifier
 
 	TArray<FUEmkaPinDef> ReturnParams; // 2+ entries = multi-return (fn foo*(): (int, str))
 

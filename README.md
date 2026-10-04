@@ -52,17 +52,18 @@ fn run*(x: int): int {    // exported - the node calls this
 | `int`     | Integer64    |
 | `int8` `int16` `int32` | Integer |
 | `uint8` `char` | Byte    |
-| `uint16` `uint32` | Integer |
+| `uint16` | Integer |
+| `uint32` | Integer64 |
 | `uint`    | Integer64    |
 | `bool`    | Boolean      |
 | `real`    | Double       |
 | `real32`  | Float        |
 | `str`     | String       |
-| user-defined `enum` type | Byte |
+| user-defined `enum` type | Pin for its integer base (Integer64 by default) |
 
 A function with no return type produces no output pin.
 
-Any unknown identifier in the signature is treated as a user-defined enum type and maps to a `Byte` pin. The pin label shows the enum name so you know which type to pass:
+Enum pins preserve the signedness and range of their declared integer base. The pin label shows the enum name:
 
 ```
 type Direction = enum { North; East; South; West }
@@ -72,11 +73,21 @@ fn opposite*(d: Direction): Direction {
 }
 ```
 
-This generates a `Byte` input pin labeled `d (Direction)` and a `Byte` output pin labeled `Direction`.
+This generates an `Integer64` input pin labeled `d (Direction)` and an `Integer64` output pin labeled `Direction`.
 
 The `type` definition must be present in the script - Umka requires it to compile. The named constants (`North`, `East`, etc.) are available anywhere in the script body.
 
-Enum arrays work as well: `[]Direction` maps to an Array of Byte pin. Enums with an explicit base type (`type Tiny = enum (uint8) { ... }`) are supported too.
+Enums at the pin boundary, including struct fields, require a named type declaration.
+
+Enum arrays use the same base mapping: `[]Direction` maps to an Array of Integer64 pin. An explicit base such as `enum (uint8)` uses Byte pins, while `enum (int8)` uses Integer pins and preserves negative values.
+
+Integer inputs outside the compiled Umka type's range fail with a runtime error instead of truncating. `uint32` uses Integer64 to represent `0..4294967295`. Since Blueprint has no unsigned 64-bit pin, `uint` preserves all 64 bits in Integer64: negative pin values represent the unsigned upper half.
+
+Valid scripts resolve type aliases through the Umka compiler. Aliases of supported scalars, enums, scalar arrays, and flat structs use the same pins as their underlying types. Unknown types and aliases of unsupported shapes produce compile errors. During incomplete edits, a source-based preview remains available for explicitly declared supported types.
+
+Raw strings enclosed in backticks can span lines. Their contents, including quotes, comment markers, and backslashes, remain literal and do not affect function discovery or syntax highlighting.
+
+Existing Blueprint connections to enum or `uint32` pins may need reconnecting after their pin types change. Recompile affected Blueprints after updating the plugin.
 
 ### Multiple return values
 
@@ -138,13 +149,14 @@ fn double*(nums: []int): []int {
 | `[]int`         | Array of Integer64  |
 | `[]int8` `[]int16` `[]int32` | Array of Integer |
 | `[]uint8` `[]char` | Array of Byte   |
-| `[]uint16` `[]uint32` | Array of Integer |
+| `[]uint16` | Array of Integer |
+| `[]uint32` | Array of Integer64 |
 | `[]uint`        | Array of Integer64  |
 | `[]bool`        | Array of Boolean    |
 | `[]real`        | Array of Double     |
 | `[]real32`      | Array of Float      |
 | `[]str`         | Array of String     |
-| `[]MyEnum` (user-defined enum) | Array of Byte |
+| `[]MyEnum` (user-defined enum) | Array for its integer base |
 
 The same pin mapping applies to fixed-size forms such as `[4]int` and `[Count]real`. Fixed-size return values are copied from Umka's inline array storage back into the Blueprint array.
 
@@ -229,8 +241,8 @@ The following Umka features are not currently supported as Blueprint pins:
 - **Closures / function types** - `fn(int): int` cannot be passed as a pin
 - **Pointers** - `^type` and `weak ^type` are not supported
 - **Pointers inside multi-return** - `fn foo*(): (^int, str)` is not supported
-- **Type aliases in exported signatures** - aliases such as `type Score = int` are rejected instead of being guessed to be enums; use the underlying supported type at the pin boundary
-- **Unknown or undeclared types** - only built-in scalar types, enums declared in the script, supported structs, and arrays of supported scalar types are accepted
+- **Aliases of unsupported types** - resolving an alias does not make maps, pointers, nested structs, or other unsupported shapes eligible for pins
+- **Unknown or undeclared types** - the Umka compiler must resolve exported signature types
 
 All of the above can still be used freely **inside** your script as local variables, helper types, and intermediate values - the restriction applies only to the exported function's signature (its parameters and return type).
 

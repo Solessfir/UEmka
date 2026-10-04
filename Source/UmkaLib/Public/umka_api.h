@@ -166,6 +166,16 @@ typedef int  (*UmkaGetArrayLen)                 (const UmkaType *arrayType);
 typedef int  (*UmkaGetFieldCount)               (const UmkaType *structType);
 typedef const UmkaType *(*UmkaGetFieldTypeByIndex)(const UmkaType *structType, int index);
 typedef int  (*UmkaGetFieldOffsetByIndex)       (const UmkaType *structType, int index);
+typedef const UmkaType *(*UmkaGetFuncType)     (Umka *umka, const char *moduleName, const char *fnName);
+typedef int  (*UmkaGetFuncParamCount)           (const UmkaType *fnType);
+typedef const char *(*UmkaGetFuncParamNameByIndex)(const UmkaType *fnType, int index);
+typedef const UmkaType *(*UmkaGetFuncParamTypeByIndex)(const UmkaType *fnType, int index);
+typedef const UmkaType *(*UmkaGetFuncResultType)(const UmkaType *fnType);
+typedef const char *(*UmkaGetTypeKindName)     (const UmkaType *type);
+typedef const char *(*UmkaGetTypeName)         (const UmkaType *type);
+typedef bool (*UmkaIsEnumType)                 (const UmkaType *type);
+typedef bool (*UmkaIsExprListType)             (const UmkaType *type);
+typedef const char *(*UmkaGetFieldNameByIndex) (const UmkaType *structType, int index);
 
 
 typedef struct
@@ -215,6 +225,16 @@ typedef struct
     UmkaGetFieldCount   umkaGetFieldCount;
     UmkaGetFieldTypeByIndex umkaGetFieldTypeByIndex;
     UmkaGetFieldOffsetByIndex umkaGetFieldOffsetByIndex;
+    UmkaGetFuncType     umkaGetFuncType;
+    UmkaGetFuncParamCount umkaGetFuncParamCount;
+    UmkaGetFuncParamNameByIndex umkaGetFuncParamNameByIndex;
+    UmkaGetFuncParamTypeByIndex umkaGetFuncParamTypeByIndex;
+    UmkaGetFuncResultType umkaGetFuncResultType;
+    UmkaGetTypeKindName umkaGetTypeKindName;
+    UmkaGetTypeName     umkaGetTypeName;
+    UmkaIsEnumType      umkaIsEnumType;
+    UmkaIsExprListType  umkaIsExprListType;
+    UmkaGetFieldNameByIndex umkaGetFieldNameByIndex;
 } UmkaAPI;
 
 
@@ -263,6 +283,16 @@ UMKA_API int  umkaGetArrayLen               (const UmkaType *arrayType);
 UMKA_API int  umkaGetFieldCount             (const UmkaType *structType);
 UMKA_API const UmkaType *umkaGetFieldTypeByIndex(const UmkaType *structType, int index);
 UMKA_API int  umkaGetFieldOffsetByIndex     (const UmkaType *structType, int index);
+UMKA_API const UmkaType *umkaGetFuncType    (Umka *umka, const char *moduleName, const char *fnName);
+UMKA_API int  umkaGetFuncParamCount         (const UmkaType *fnType);
+UMKA_API const char *umkaGetFuncParamNameByIndex(const UmkaType *fnType, int index);
+UMKA_API const UmkaType *umkaGetFuncParamTypeByIndex(const UmkaType *fnType, int index);
+UMKA_API const UmkaType *umkaGetFuncResultType(const UmkaType *fnType);
+UMKA_API const char *umkaGetTypeKindName    (const UmkaType *type);
+UMKA_API const char *umkaGetTypeName        (const UmkaType *type);
+UMKA_API bool umkaIsEnumType                (const UmkaType *type);
+UMKA_API bool umkaIsExprListType            (const UmkaType *type);
+UMKA_API const char *umkaGetFieldNameByIndex(const UmkaType *structType, int index);
 
 
 static inline UmkaAPI *umkaGetAPI(Umka *umka)
