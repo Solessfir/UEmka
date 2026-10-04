@@ -9,6 +9,7 @@
 #include "K2Node_MakeArray.h"
 #include "KismetCompiler.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Internationalization/Regex.h"
 #include "UEmkaFunctionLibrary.h"
 #include "UEmkaRecordTypes.h"
 #include UE_INLINE_GENERATED_CPP_BY_NAME(K2Node_UEmka)
@@ -447,15 +448,15 @@ static FUEmkaPinDef MakeCompiledPin(const FUEmkaCompiledValue& Value, const FStr
 	return Pin;
 }
 
-static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const FUEmkaCompiledSignature& Compiled)
+static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const FUEmkaCompiledSignature& Compiled, const bool bNativeStructPins)
 {
 	FUEmkaSignature Sig;
 	Sig.FunctionName = FunctionName;
 	Sig.bValid = true;
 	TFunction<FString(const FUEmkaCompiledValue&, const FString&, const FString&)> FlattenInput;
-	FlattenInput = [&Sig, &FlattenInput](const FUEmkaCompiledValue& Value, const FString& Name, const FString& FriendlyName)
+	FlattenInput = [&Sig, &FlattenInput, bNativeStructPins](const FUEmkaCompiledValue& Value, const FString& Name, const FString& FriendlyName)
 	{
-		if (Value.bIsStruct)
+		if (Value.bIsStruct && !bNativeStructPins)
 		{
 			Sig.bNeedsShim = true;
 			TArray<FString> Initializers;
@@ -492,9 +493,9 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 		TArray<FString> ReturnExpressions;
 		TArray<FString> ReturnTypes;
 		TFunction<void(const FUEmkaCompiledValue&, const FString&, const FString&, const FString&)> FlattenResult;
-		FlattenResult = [&Sig, &ReturnExpressions, &ReturnTypes, &FlattenResult](const FUEmkaCompiledValue& Value, const FString& Name, const FString& Friendly, const FString& Expression)
+		FlattenResult = [&Sig, &ReturnExpressions, &ReturnTypes, &FlattenResult, bNativeStructPins](const FUEmkaCompiledValue& Value, const FString& Name, const FString& Friendly, const FString& Expression)
 		{
-			if (Value.bIsStruct)
+			if (Value.bIsStruct && !bNativeStructPins)
 			{
 				Sig.bNeedsShim = true;
 				for (const FUEmkaCompiledValue& Field : Value.Fields)
@@ -579,7 +580,22 @@ static FUEmkaSignature MakeCompiledSignature(const FString& FunctionName, const 
 	return Sig;
 }
 
-FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
+TArray<FString> UK2Node_UEmka::GetExportedFunctions(const FString& Source)
+{
+	TArray<FString> Functions;
+	const FString StructuralSource = MakeUEmkaStructuralView(Source);
+	const FRegexPattern Pattern(TEXT("\\bfn\\s+([A-Za-z_][A-Za-z_0-9]*)\\s*\\*\\s*\\("));
+	FRegexMatcher Matcher(Pattern, StructuralSource);
+	while (Matcher.FindNext())
+	{
+		const FString Name = Matcher.GetCaptureGroup(1);
+		if (!Functions.ContainsByPredicate([&Name](const FString& Existing) { return Existing.Equals(Name, ESearchCase::CaseSensitive); })) Functions.Add(Name);
+	}
+	return Functions;
+}
+
+FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript, const FString& SelectedFunction, const bool bNativeStructPins,
+	const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
 {
 	FUEmkaSignature Sig;
 	const FString StructuralScript = MakeUEmkaStructuralView(InScript);
@@ -631,7 +647,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				{
 					++Pos;
 					SkipWhitespace();
-					if (Pos < Len && StructuralScript[Pos] == TEXT('('))
+					if (Pos < Len && StructuralScript[Pos] == TEXT('(') && (SelectedFunction.IsEmpty() || SelectedFunction.Equals(CandidateName, ESearchCase::CaseSensitive)))
 					{
 						FuncName = CandidateName;
 						++Pos;
@@ -646,13 +662,22 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 		++Pos;
 	}
 
-	if (!bFoundExportedFunction) return Sig;
+	if (!bFoundExportedFunction)
+	{
+		if (!SelectedFunction.IsEmpty())
+		{
+			Sig.bValid = true;
+			Sig.FunctionName = SelectedFunction;
+			Sig.UnsupportedReason = FString::Printf(TEXT("exported function '%s' was not found"), *SelectedFunction);
+		}
+		return Sig;
+	}
 
 	// Use compiler-resolved types when available; the source parser keeps previews useful during edits.
 	FUEmkaCompiledSignature Compiled;
-	if (UUEmkaFunctionLibrary::InspectScriptFunction(InScript, FuncName, Compiled))
+	if (UUEmkaFunctionLibrary::InspectScriptFunction(InScript, FuncName, Compiled, Modules, FileName, bAllowFileImports))
 	{
-		return MakeCompiledSignature(FuncName, Compiled);
+		return MakeCompiledSignature(FuncName, Compiled, bNativeStructPins);
 	}
 
 	// Collect everything inside the parameter parens (handle nested parens)
@@ -1128,16 +1153,33 @@ FString UK2Node_UEmka::GetEffectiveFunctionName(const FUEmkaSignature& Sig)
 
 void UK2Node_UEmka::PostLoad()
 {
+	PreloadRequiredAssets();
 	Super::PostLoad();
-	ParsedSignature = ParseScript(Script);
-	UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, ParsedSignature), LastErrorMessage, LastErrorLine);
+	ParsedSignature = ParseCurrentScript();
+	CompileCurrentScript(GetEffectiveScript(GetScriptSource(), ParsedSignature), LastErrorMessage, LastErrorLine);
+}
+
+void UK2Node_UEmka::PreloadRequiredAssets()
+{
+	TArray<UUEmkaScriptAsset*> Pending;
+	if (ScriptAsset) Pending.Add(ScriptAsset);
+	TSet<UUEmkaScriptAsset*> Visited;
+	while (!Pending.IsEmpty())
+	{
+		UUEmkaScriptAsset* Asset = Pending.Pop();
+		if (!Asset || Visited.Contains(Asset)) continue;
+		Visited.Add(Asset);
+		PreloadObject(Asset);
+		for (UUEmkaScriptAsset* Import : Asset->Imports) Pending.Add(Import);
+	}
+	Super::PreloadRequiredAssets();
 }
 
 void UK2Node_UEmka::PostEditUndo()
 {
 	// Script has been restored by the transaction system - re-derive everything that isn't a UPROPERTY.
-	ParsedSignature = ParseScript(Script);
-	if (UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, ParsedSignature), LastErrorMessage, LastErrorLine))
+	ParsedSignature = ParseCurrentScript();
+	if (CompileCurrentScript(GetEffectiveScript(GetScriptSource(), ParsedSignature), LastErrorMessage, LastErrorLine))
 	{
 		LastErrorLine = -1;
 		LastErrorMessage.Empty();
@@ -1151,13 +1193,14 @@ void UK2Node_UEmka::AllocateDefaultPins()
 {
 	// Always re-parse here so pins are correct regardless of how AllocateDefaultPins is invoked
 	// (e.g., during Blueprint compiler's internal reconstruction where ParsedSignature may not be pre-populated)
-	ParsedSignature = ParseScript(Script);
+	ParsedSignature = ParseCurrentScript();
 
 	// Exec in/out
 	CreatePin(EGPD_Input,  UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Execute);
 	CreatePin(EGPD_Output, UEdGraphSchema_K2::PC_Exec, UEdGraphSchema_K2::PN_Then);
 	TArray<FEdGraphPinType> InputTypes;
 	TArray<FEdGraphPinType> OutputTypes;
+	TArray<FString> InputDefaults;
 	auto ResolveType = [this](const FUEmkaCompiledValue& Value, const EUEmkaValueType Type, const bool bIsArray)
 	{
 		FString TypeError;
@@ -1168,7 +1211,15 @@ void UK2Node_UEmka::AllocateDefaultPins()
 	};
 	for (const FUEmkaPinDef& Param : ParsedSignature.Params)
 	{
-		InputTypes.Add(ResolveType(Param.CompiledValue, Param.Type, Param.bIsArray));
+		const FEdGraphPinType Type = ResolveType(Param.CompiledValue, Param.Type, Param.bIsArray);
+		InputTypes.Add(Type);
+		FString Default = Param.CompiledValue.DefaultValue;
+		if (Param.CompiledValue.bIsStruct && Param.CompiledValue.bHasDefault && ParsedSignature.UnsupportedReason.IsEmpty())
+		{
+			FString Error;
+			if (!UEmkaRecordTypes::GetDefaultValue(Param.CompiledValue, Type, Default, Error)) ParsedSignature.UnsupportedReason = Error;
+		}
+		InputDefaults.Add(Default);
 	}
 	for (const FUEmkaPinDef& Result : ParsedSignature.ReturnParams)
 	{
@@ -1191,9 +1242,9 @@ void UK2Node_UEmka::AllocateDefaultPins()
 		const FEdGraphPinType& PinType = InputTypes[Index];
 		UEdGraphPin* NewPin = CreatePin(EGPD_Input, PinType.PinCategory, FName(*Param.Name));
 		NewPin->PinType = PinType;
-		if (Param.CompiledValue.bHasDefault && Param.CompiledValue.DefaultCompositeValue.IsEmpty())
+		if (Param.CompiledValue.bHasDefault && (Param.CompiledValue.DefaultCompositeValue.IsEmpty() || Param.CompiledValue.bIsStruct))
 		{
-			GetDefault<UEdGraphSchema_K2>()->SetPinAutogeneratedDefaultValue(NewPin, Param.CompiledValue.DefaultValue);
+			GetDefault<UEdGraphSchema_K2>()->SetPinAutogeneratedDefaultValue(NewPin, InputDefaults[Index]);
 		}
 		if (!Param.FriendlyName.IsEmpty())
 		{
@@ -1294,7 +1345,7 @@ void UK2Node_UEmka::ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLo
 {
 	Super::ValidateNodeDuringCompilation(MessageLog);
 
-	if (Script.IsEmpty())
+	if (GetScriptSource().IsEmpty() && !ScriptAsset)
 	{
 		MessageLog.Warning(*LOCTEXT("EmptyScript", "UEmka node has empty script: @@").ToString(), this);
 		return;
@@ -1315,7 +1366,7 @@ void UK2Node_UEmka::ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLo
 	// Run a full Umka compile (including any generated shim) to catch type errors, undefined symbols, etc.
 	FString CompileError;
 	int32 ErrorLine = -1;
-	if (!UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, ParsedSignature), CompileError, ErrorLine))
+	if (!CompileCurrentScript(GetEffectiveScript(GetScriptSource(), ParsedSignature), CompileError, ErrorLine))
 	{
 		LastErrorLine = ErrorLine;
 		LastErrorMessage = CompileError;
@@ -1330,12 +1381,86 @@ void UK2Node_UEmka::ValidateNodeDuringCompilation(FCompilerResultsLog& MessageLo
 
 void UK2Node_UEmka::OnScriptChanged(const FString& NewScript)
 {
-	Script = NewScript;
-	const FUEmkaSignature NewSig = ParseScript(Script);
+	if (!ScriptAsset) Script = NewScript;
+	RefreshScript();
+}
+
+FString UK2Node_UEmka::GetScriptSource() const
+{
+	if (ScriptAsset) ScriptAsset->ConditionalPreload();
+	return ScriptAsset ? ScriptAsset->Source : Script;
+}
+
+bool UK2Node_UEmka::ResolveCurrentSource(FString& OutSource, FString& OutFileName, TArray<FUEmkaModuleSource>& OutModules, FString& OutError) const
+{
+	if (ScriptAsset) return UUEmkaScriptAsset::ResolveAsset(ScriptAsset, OutSource, OutFileName, OutModules, OutError);
+	OutSource = Script;
+	OutFileName = TEXT("script.um");
+	OutModules.Reset();
+	OutError.Reset();
+	return true;
+}
+
+FUEmkaSignature UK2Node_UEmka::ParseCurrentScript() const
+{
+	FString Source, FileName, Error;
+	TArray<FUEmkaModuleSource> Modules;
+	if (!ResolveCurrentSource(Source, FileName, Modules, Error))
+	{
+		FUEmkaSignature Signature;
+		Signature.bValid = true;
+		Signature.FunctionName = SelectedFunction;
+		Signature.UnsupportedReason = Error;
+		return Signature;
+	}
+	return ParseScript(Source, SelectedFunction, bNativeStructPins, Modules, FileName, !ScriptAsset);
+}
+
+bool UK2Node_UEmka::CompileCurrentScript(const FString& Source, FString& OutError, int32& OutLine) const
+{
+	FString ResolvedSource, FileName;
+	TArray<FUEmkaModuleSource> Modules;
+	OutLine = -1;
+	if (!ResolveCurrentSource(ResolvedSource, FileName, Modules, OutError)) return false;
+	return UUEmkaFunctionLibrary::CompileCheckScript(Source, OutError, OutLine, Modules, FileName, !ScriptAsset);
+}
+
+void UK2Node_UEmka::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	const FName Name = PropertyChangedEvent.GetMemberPropertyName();
+	if (Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, ScriptAsset)
+		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, SelectedFunction)
+		|| Name == GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, bNativeStructPins)) RefreshScript();
+}
+
+void UK2Node_UEmka::OnScriptAssetChanged(UUEmkaScriptAsset* ChangedAsset)
+{
+	TArray<const UUEmkaScriptAsset*> Pending;
+	if (ScriptAsset) Pending.Add(ScriptAsset);
+	TSet<const UUEmkaScriptAsset*> Visited;
+	while (!Pending.IsEmpty())
+	{
+		const UUEmkaScriptAsset* Asset = Pending.Pop(EAllowShrinking::No);
+		if (!Asset || Visited.Contains(Asset)) continue;
+		Visited.Add(Asset);
+		if (Asset == ChangedAsset)
+		{
+			Modify();
+			RefreshScript();
+			return;
+		}
+		for (const UUEmkaScriptAsset* Dependency : Asset->Imports) Pending.Add(Dependency);
+	}
+}
+
+void UK2Node_UEmka::RefreshScript()
+{
+	const FUEmkaSignature NewSig = ParseCurrentScript();
 
 	// Live compile check - drives squiggly line highlighting in SGraphNode_UEmka.
 	// Checks the effective script so generated shim errors surface immediately.
-	if (UUEmkaFunctionLibrary::CompileCheckScript(GetEffectiveScript(Script, NewSig), LastErrorMessage, LastErrorLine))
+	if (CompileCurrentScript(GetEffectiveScript(GetScriptSource(), NewSig), LastErrorMessage, LastErrorLine))
 	{
 		LastErrorLine = -1;
 		LastErrorMessage.Empty();
@@ -1372,6 +1497,7 @@ void UK2Node_UEmka::OnScriptChanged(const FString& NewScript)
 	{
 		FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 	}
+	if (GetGraph()) GetGraph()->NotifyGraphChanged();
 }
 
 // -------------------------------------------------------------------------
@@ -1429,6 +1555,56 @@ static FName GetGetResultFuncName(const EUEmkaValueType RetType, const bool bIsA
 
 void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph)
 {
+	// UE split pins discard container defaults. Materialize them before MakeStruct expansion.
+	TFunction<bool(UEdGraphPin*, const FString&)> RestoreSplitDefaults;
+	RestoreSplitDefaults = [this, &CompilerContext, SourceGraph, &RestoreSplitDefaults](UEdGraphPin* Parent, const FString& ParentText)
+	{
+		for (UEdGraphPin* Child : Parent->SubPins)
+		{
+			if (!Child->LinkedTo.IsEmpty() || (!Child->PinType.IsContainer() && Child->SubPins.IsEmpty())) continue;
+			FString FieldText;
+			FString Error;
+			const FName FieldName(*Child->PinName.ToString().RightChop(Parent->PinName.ToString().Len() + 1));
+			if (!UEmkaRecordTypes::GetFieldDefaultValue(Parent->PinType, ParentText, FieldName, FieldText, Error))
+			{
+				CompilerContext.MessageLog.Error(*FString::Printf(TEXT("UEmka split default: %s @@"), *Error), this);
+				return false;
+			}
+			if (!Child->SubPins.IsEmpty())
+			{
+				if (!RestoreSplitDefaults(Child, FieldText)) return false;
+				continue;
+			}
+			TArray<uint8> Bytes;
+			const FString& DefaultText = Child->DefaultValue.IsEmpty() ? FieldText : Child->DefaultValue;
+			if (!UEmkaRecordTypes::EncodeDefaultValue(Child->PinType, DefaultText, Bytes, Error))
+			{
+				CompilerContext.MessageLog.Error(*FString::Printf(TEXT("UEmka split container default: %s @@"), *Error), this);
+				return false;
+			}
+			UK2Node_CallFunction* DefaultNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
+			DefaultNode->FunctionReference.SetExternalMember(GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeCompositeDefaultParam), UUEmkaFunctionLibrary::StaticClass());
+			DefaultNode->AllocateDefaultPins();
+			DefaultNode->FindPinChecked(TEXT("Value"))->DefaultValue = BytesToHex(Bytes.GetData(), Bytes.Num());
+			DefaultNode->FindPinChecked(TEXT("bIsArray"))->DefaultValue = Child->PinType.IsArray() ? TEXT("true") : TEXT("false");
+			UK2Node_CallFunction* DecodeNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
+			DecodeNode->FunctionReference.SetExternalMember(GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetCompositeResult), UUEmkaFunctionLibrary::StaticClass());
+			DecodeNode->AllocateDefaultPins();
+			DefaultNode->FindPinChecked(TEXT("ReturnValue"))->MakeLinkTo(DecodeNode->FindPinChecked(TEXT("Result")));
+			UEdGraphPin* Output = DecodeNode->FindPinChecked(TEXT("Value"), EGPD_Output);
+			Output->PinType = Child->PinType;
+			Output->MakeLinkTo(Child);
+		}
+		return true;
+	};
+	for (UEdGraphPin* Pin : Pins)
+	{
+		if (Pin->Direction == EGPD_Input && !Pin->ParentPin && !Pin->SubPins.IsEmpty() && !RestoreSplitDefaults(Pin, Pin->DefaultValue))
+		{
+			BreakAllNodeLinks();
+			return;
+		}
+	}
 	Super::ExpandNode(CompilerContext, SourceGraph);
 
 	if (!ParsedSignature.bValid)
@@ -1451,11 +1627,13 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 	UK2Node_CallFunction* CallNode = CompilerContext.SpawnIntermediateNode<UK2Node_CallFunction>(this, SourceGraph);
 	if (bMultiReturn)
 	{
-		CallNode->FunctionReference.SetExternalMember(GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInlineMulti), UUEmkaFunctionLibrary::StaticClass());
+		CallNode->FunctionReference.SetExternalMember(ScriptAsset ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaAssetMulti)
+			: GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInlineMulti), UUEmkaFunctionLibrary::StaticClass());
 	}
 	else
 	{
-		CallNode->FunctionReference.SetExternalMember(GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInline), UUEmkaFunctionLibrary::StaticClass());
+		CallNode->FunctionReference.SetExternalMember(ScriptAsset ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaAsset)
+			: GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, RunUmkaInline), UUEmkaFunctionLibrary::StaticClass());
 	}
 	CallNode->AllocateDefaultPins();
 
@@ -1466,7 +1644,8 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 	CompilerContext.MovePinLinksToIntermediate(*FindPinChecked(UEdGraphSchema_K2::PN_Then, EGPD_Output), *CallNode->GetThenPin());
 
 	// Set Script literal - includes the generated __uemka_call shim for struct signatures
-	CallNode->FindPinChecked(TEXT("Script"))->DefaultValue = GetEffectiveScript(Script, ParsedSignature);
+	CallNode->FindPinChecked(TEXT("Script"))->DefaultValue = GetEffectiveScript(GetScriptSource(), ParsedSignature);
+	if (ScriptAsset) CallNode->FindPinChecked(TEXT("Asset"))->DefaultObject = ScriptAsset;
 
 	// Set FunctionName literal
 	CallNode->FindPinChecked(TEXT("FunctionName"))->DefaultValue = GetEffectiveFunctionName(ParsedSignature);
@@ -1537,7 +1716,23 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 
 			// Choose the typed helper - array vs scalar, CallFunction avoids MakeStruct validation warnings
 			UEdGraphPin* InputPin = FindPin(FName(*Param.Name), EGPD_Input);
-			const bool bCompositeDefault = InputPin && InputPin->LinkedTo.IsEmpty() && Param.CompiledValue.bHasDefault && !Param.CompiledValue.DefaultCompositeValue.IsEmpty();
+			const bool bCompiledDefault = InputPin && InputPin->LinkedTo.IsEmpty() && Param.CompiledValue.bHasDefault
+				&& !Param.CompiledValue.DefaultCompositeValue.IsEmpty()
+				&& (!Param.CompiledValue.bIsStruct || InputPin->DefaultValue.Equals(InputPin->AutogeneratedDefaultValue, ESearchCase::CaseSensitive));
+			const bool bLiteralComposite = InputPin && InputPin->LinkedTo.IsEmpty()
+				&& (Param.Type == EUEmkaValueType::Composite || InputPin->PinType.IsContainer()) && !bCompiledDefault;
+			TArray<uint8> DefaultBytes = Param.CompiledValue.DefaultCompositeValue;
+			if (bLiteralComposite)
+			{
+				FString Error;
+				if (!UEmkaRecordTypes::EncodeDefaultValue(InputPin->PinType, InputPin->DefaultValue, DefaultBytes, Error))
+				{
+					CompilerContext.MessageLog.Error(*FString::Printf(TEXT("UEmka composite default: %s @@"), *Error), this);
+					BreakAllNodeLinks();
+					return;
+				}
+			}
+			const bool bCompositeDefault = bCompiledDefault || bLiteralComposite;
 			const FName MakeFuncName = bCompositeDefault ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeCompositeDefaultParam)
 				: (Param.Type == EUEmkaValueType::Composite ? GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeCompositeParam) : GetMakeParamFuncName(Param.Type, Param.bIsArray));
 
@@ -1558,8 +1753,7 @@ void UK2Node_UEmka::ExpandNode(FKismetCompilerContext& CompilerContext, UEdGraph
 			// Connect our input pin -> helper Values/Value pin
 			if (bCompositeDefault)
 			{
-				const TArray<uint8>& Bytes = Param.CompiledValue.DefaultCompositeValue;
-				MakeParamNode->FindPinChecked(TEXT("Value"))->DefaultValue = BytesToHex(Bytes.GetData(), Bytes.Num());
+				MakeParamNode->FindPinChecked(TEXT("Value"))->DefaultValue = BytesToHex(DefaultBytes.GetData(), DefaultBytes.Num());
 				MakeParamNode->FindPinChecked(TEXT("bIsArray"))->DefaultValue = Param.bIsArray ? TEXT("true") : TEXT("false");
 			}
 			else if (InputPin)

@@ -13,4 +13,5 @@ public:
 
 private:
 	TSharedPtr<struct FGraphPanelNodeFactory> NodeFactory;
+	FDelegateHandle ScriptAssetChangedHandle;
 };

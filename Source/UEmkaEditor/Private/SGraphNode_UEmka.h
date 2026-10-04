@@ -24,6 +24,10 @@ public:
 
 private:
 	FText GetScriptText() const;
+	bool IsScriptReadOnly() const;
+	FText GetSelectedFunctionText() const;
+	void OnFunctionSelected(TSharedPtr<FString> Function, ESelectInfo::Type SelectInfo);
+	void OpenScriptAsset() const;
 
 	void OnScriptTextCommitted(const FText& NewText, ETextCommit::Type CommitType) const;
 
@@ -40,4 +44,6 @@ private:
 	TSharedPtr<SMultiLineEditableTextBox> CodeEditor;
 
 	TSharedPtr<FUEmkaSyntaxHighlighter> SyntaxHighlighter;
+
+	TArray<TSharedPtr<FString>> ExportedFunctions;
 };

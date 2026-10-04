@@ -263,6 +263,7 @@ void moduleInit(Modules *modules, Storage *storage, bool implLibsEnabled, Error 
     modules->numModules = 0;
     modules->numModuleSources = 0;
     modules->implLibsEnabled = implLibsEnabled;
+    modules->fileImportsEnabled = true;
     modules->storage = storage;
     modules->error = error;
 
@@ -427,7 +428,9 @@ void *moduleGetImplLibFunc(const Module *module, const char *name)
 bool moduleRegularizePath(const Modules *modules, const char *path, const char *curFolder, char *regularizedPath, int size)
 {
     char *absolutePath = storageAdd(modules->storage, size);
-    snprintf(absolutePath, size, "%s%s", modulePathIsAbsolute(path) ? "" : curFolder, path);
+    const int pathLength = snprintf(absolutePath, size, "%s%s", modulePathIsAbsolute(path) ? "" : curFolder, path);
+    if (pathLength < 0 || pathLength >= size)
+        return false;
 
     char **separators = storageAdd(modules->storage, size * sizeof(char *));
     int numSeparators = 0;
@@ -601,4 +604,3 @@ External *externalAdd(Externals *externals, const char *name, void *entry, void 
 
     return external;
 }
-

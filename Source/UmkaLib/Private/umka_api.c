@@ -165,7 +165,18 @@ UMKA_API char *umkaAsm(Umka *umka)
 
 UMKA_API bool umkaAddModule(Umka *umka, const char *fileName, const char *sourceString)
 {
-    return compilerAddModule(umka, fileName, sourceString);
+    if (!umka || !fileName || !sourceString)
+        return false;
+    if (setjmp(umka->error.jumper) == 0)
+        return compilerAddModule(umka, fileName, sourceString);
+    return false;
+}
+
+
+UMKA_API void umkaSetFileImportsEnabled(Umka *umka, bool enabled)
+{
+    if (umka)
+        umka->modules.fileImportsEnabled = enabled;
 }
 
 
@@ -497,6 +508,45 @@ UMKA_API const char *umkaGetTypeKindName(const UmkaType *type)
 UMKA_API const char *umkaGetTypeName(const UmkaType *type)
 {
     return type && type->typeIdent ? type->typeIdent->name : NULL;
+}
+
+
+UMKA_API const char *umkaGetTypeNameInMainModule(Umka *umka, const UmkaType *type)
+{
+    if (!umka || !type || !type->typeIdent || umka->modules.numModules <= 1)
+        return NULL;
+
+    const Ident *ident = type->typeIdent;
+    if (ident->block == 0 && ident->module <= 1)
+        return ident->name;
+
+    const char *alias = ident->module >= 0 && ident->module < umka->modules.numModules
+        ? umka->modules.module[1]->importAlias[ident->module] : NULL;
+    if (ident->block != 0 || !ident->isExported || !alias)
+    {
+        ident = NULL;
+        for (const Ident *candidate = umka->idents.first; candidate; candidate = candidate->next)
+        {
+            if (candidate->kind != IDENT_TYPE || candidate->block != 0 || !typeSameExceptMaybeIdent(candidate->type, type))
+                continue;
+            if (candidate->module <= 1)
+                return candidate->name;
+            const char *candidateAlias = umka->modules.module[1]->importAlias[candidate->module];
+            if (candidate->isExported && candidateAlias)
+            {
+                ident = candidate;
+                alias = candidateAlias;
+                break;
+            }
+        }
+        if (!ident)
+            return NULL;
+    }
+
+    const size_t len = strlen(alias) + strlen(ident->name) + 3;
+    char *name = storageAdd(&umka->storage, len);
+    snprintf(name, len, "%s::%s", alias, ident->name);
+    return name;
 }
 
 

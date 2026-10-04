@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Kismet/BlueprintFunctionLibrary.h"
+#include "UEmkaScriptAsset.h"
 #include "UEmkaFunctionLibrary.generated.h"
 
 // Maps Umka type keywords to their UmkaStackSlot field and UE pin type.
@@ -47,7 +48,18 @@ struct UEMKA_API FUEmkaCompiledValue
 	int32 ArrayLen = 0;
 	int32 EnumByteSize = 8;
 	TArray<FUEmkaCompiledValue> Fields;
-	bool operator==(const FUEmkaCompiledValue&) const = default;
+	bool operator==(const FUEmkaCompiledValue& Other) const
+	{
+		return Name.Equals(Other.Name, ESearchCase::CaseSensitive)
+			&& TypeName.Equals(Other.TypeName, ESearchCase::CaseSensitive)
+			&& DefaultValue.Equals(Other.DefaultValue, ESearchCase::CaseSensitive)
+			&& Type == Other.Type && bSupported == Other.bSupported
+			&& bIsArray == Other.bIsArray && bIsStaticArray == Other.bIsStaticArray
+			&& bIsEnum == Other.bIsEnum && bIsStruct == Other.bIsStruct && bIsTuple == Other.bIsTuple
+			&& bIsMap == Other.bIsMap && bHasDefault == Other.bHasDefault
+			&& DefaultCompositeValue == Other.DefaultCompositeValue
+			&& ArrayLen == Other.ArrayLen && EnumByteSize == Other.EnumByteSize && Fields == Other.Fields;
+	}
 };
 
 struct UEMKA_API FUEmkaCompiledSignature
@@ -125,16 +137,22 @@ public:
 	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
 	static bool RunUmkaInlineMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error);
 
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
+	static bool RunUmkaAsset(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error);
+
+	UFUNCTION(BlueprintCallable, Meta = (BlueprintInternalUseOnly = true, DefaultToSelf = "Caller", HidePin = "Caller"), Category = "UEmka")
+	static bool RunUmkaAssetMulti(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error);
+
 	// Index into the multi-return Results array from RunUmkaInlineMulti.
 	UFUNCTION(BlueprintPure, Meta = (BlueprintInternalUseOnly = true), Category = "UEmka")
 	static FUEmkaScriptParam GetMultiResultAt(const TArray<FUEmkaScriptParam>& Results, const int32 Index);
 
 	// Compile-only check - no execution. Used by UK2Node_UEmka for static validation.
 	// Returns false and populates OutError / OutLine (1-based) on failure.
-	static bool CompileCheckScript(const FString& Script, FString& OutError, int32& OutLine);
+	static bool CompileCheckScript(const FString& Script, FString& OutError, int32& OutLine, const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true);
 
 	// Compile-only signature inspection. Unsupported shapes are reported through bSupported.
-	static bool InspectScriptFunction(const FString& Script, const FString& FunctionName, FUEmkaCompiledSignature& OutSignature);
+	static bool InspectScriptFunction(const FString& Script, const FString& FunctionName, FUEmkaCompiledSignature& OutSignature, const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true);
 
 	UFUNCTION(BlueprintPure, CustomThunk, Meta = (BlueprintInternalUseOnly = true, CustomStructureParam = "Value"), Category = "UEmka")
 	static FUEmkaScriptParam MakeCompositeParam(const int32& Value, const bool bIsStaticArray);

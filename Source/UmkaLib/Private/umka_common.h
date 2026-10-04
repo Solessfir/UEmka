@@ -130,6 +130,7 @@ typedef struct
     int numModules, numModuleSources;
     char curFolder[DEFAULT_STR_LEN + 1];
     bool implLibsEnabled;
+    bool fileImportsEnabled;
     Storage *storage;
     Error *error;
 } Modules;

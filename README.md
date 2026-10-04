@@ -24,6 +24,8 @@ Search for **Umka Script** in the Blueprint node palette and place it in any eve
 
 The node contains an inline code editor. Write an exported Umka function and the node will automatically generate typed input and output pins matching its signature.
 
+The function selector chooses any exported function in the script. **Automatic (first export)** preserves the original behavior. A missing, private, or differently capitalized selection produces a compile error. Select the node to configure its script asset and native struct pins in the Details panel.
+
 
 
 ## Writing Scripts
@@ -130,11 +132,11 @@ fn splitEven*(nums: []int): ([]int, []int) {
 
 This generates `ReturnValue1`: Array of Integer64 and `ReturnValue2`: Array of Integer64.
 
-A single-element list like `(int)` is treated the same as a plain `int` return. Structs in a return tuple are recursively flattened into fields in declaration order; arrays and maps remain single output pins.
+A single-element list like `(int)` is treated the same as a plain `int` return. Structs in a return tuple are recursively flattened into fields in declaration order by default; arrays and maps remain single output pins.
 
 ### Default parameters
 
-Unconnected inputs use the defaults evaluated by the Umka compiler, including constant expressions, enums, strings, arrays, and supported structs. Scalar defaults appear directly on the pins. Defaults for struct parameters apply to their flattened fields. Connecting an input or editing a scalar pin's default overrides the script default.
+Unconnected inputs use the defaults evaluated by the Umka compiler, including constant expressions, enums, strings, arrays, and supported structs. Scalar defaults appear directly on the pins. Defaults for struct parameters apply to their flattened fields or native struct pin. Connecting an input or editing its default overrides the script default.
 
 ### Arrays
 
@@ -183,9 +185,11 @@ This generates input pins `p.x`, `p.y`, `d.x`, `d.y` (Double), `scale` (Double),
 
 Under the hood the node compiles a small wrapper function with a flat signature that packs the pins into struct values, calls your function, and unpacks the result. Your script is unchanged.
 
-Fields may contain supported scalars, arrays, scalar maps, and nested structs. Nested struct fields are recursively flattened, so a field such as `p.position.x` becomes a scalar pin while `p.samples` remains an array pin.
+Fields may contain supported scalars, arrays, maps, and nested structs. Nested struct fields are recursively flattened, so a field such as `p.position.x` becomes a scalar pin while `p.samples` remains an array pin.
 
-Struct arrays use native Blueprint struct arrays. Their element types are generated from the compiled field layout and saved with the owning Blueprint package. Fields in these native structs can include nested structs, arrays, and scalar maps. Identical field layouts share a generated type within the package.
+Struct arrays use native Blueprint struct arrays. Their element types are generated from the compiled field layout and saved with the owning Blueprint package. Fields in these native structs can include nested structs, arrays, and maps. Identical field layouts share a generated type within the package.
+
+Enable **Native Struct Pins** in the node's Details panel to pass individual structs through one native Blueprint pin. Standard Make/Break and split-pin workflows are available. Structs in return tuples then occupy one output pin each. Existing nodes retain flattened pins by default. Compiler defaults populate native input pins, including nested fields, and edited defaults override them.
 
 **Constraints:**
 - Native Blueprint struct field names must be unique without regard to case
@@ -196,7 +200,7 @@ Struct arrays use native Blueprint struct arrays. Their element types are genera
 
 ### Maps
 
-`map[K]V` becomes a native Blueprint Map pin. Keys can be any supported integer type, a named enum, or `str`; values can be any supported scalar or named enum. Integer ranges follow the same rules as scalar pins.
+`map[K]V` becomes a native Blueprint Map pin. Keys can be any supported integer type, a named enum, or `str`; values can be any supported scalar, named enum, or supported struct. Integer ranges follow the same rules as scalar pins.
 
 ```
 fn increment*(counts: map[str]int): map[str]int {
@@ -205,7 +209,35 @@ fn increment*(counts: map[str]int): map[str]int {
 }
 ```
 
-Maps are also supported in struct fields and return tuples. Maps with struct or container values, and maps with floating-point keys, cannot cross Blueprint pins.
+Maps are also supported in struct fields and return tuples. Struct values use generated native Blueprint structs and may contain nested structs, arrays, and supported maps. Direct container values and floating-point keys cannot cross Blueprint pins.
+
+Blueprint string keys compare without regard to case. An Umka map containing keys that differ only by case cannot be converted and reports a duplicate-key error.
+
+### Reusable scripts and modules
+
+Create a **UEmka Script Asset** in the Content Browser and edit its **Source** in the asset's Details panel. Assign it to a node's **Script Asset** property to reuse the same script in multiple graphs. The node displays the asset's source read-only and provides a link to open the asset. Clearing the asset restores the node's inline script.
+
+Each asset has a **Module Path** and an **Imports** list. An empty path uses the asset name plus `.um`. Explicit paths must be relative `.um` filenames with forward slashes, no empty or `.`/`..` segments, and at most 255 UTF-8 bytes. Paths identify sources within the shared virtual module root; import strings resolve relative to the importing module.
+
+For example, give a helper asset the path `lib/helpers.um` and source:
+
+```
+fn twice*(value: int): int { return value * 2 }
+```
+
+Give the main asset the path `main.um`, add the helper asset to its **Imports**, and use:
+
+```
+import helpers = "lib/helpers.um"
+
+fn calculate*(value: int = 7): int {
+    return helpers::twice(value)
+}
+```
+
+Imports may reference assets that import further assets. Missing references, cycles, and conflicting module paths produce errors. Imported types used by generated wrappers must be accessible through the main module's import aliases. Changing a referenced asset refreshes loaded nodes and marks their Blueprints for recompilation.
+
+The compiled Blueprint keeps a hard reference to its source asset, and assets retain their transitive imports. Source text and module dependencies remain available in cooked builds. Asset-backed scripts load imports from these assets and Umka's embedded standard modules; they do not fall back to loose source files on disk.
 
 ### Example - Fibonacci
 
@@ -259,7 +291,7 @@ Captured output is limited to at most 64 KB per execution; the operating system'
 
 The following Umka features are not currently supported as Blueprint pins:
 
-- **Directly nested containers** - `[][]int`, arrays of maps, and maps with container or struct values; a struct may contain supported arrays and maps
+- **Directly nested containers** - `[][]int`, arrays of maps, and maps with container values; a struct may contain supported arrays and maps
 - **Unsupported map keys** - floating-point, struct, and container keys
 - **Structs with unsupported fields** - pointers, interfaces, or function types
 - **Closures / function types** - `fn(int): int` cannot be passed as a pin
@@ -286,6 +318,12 @@ fn length*(x: real, y: real): real {
 
 Run the `UEmka` group in Unreal Editor's Automation window, or launch the editor with `-unattended -nullrhi -nosound -ExecCmds="Automation RunTests UEmka;Quit"`.
 
-The suite covers every supported scalar type and enum integer base, aliases, dynamic and fixed arrays, empty containers, integer boundaries, Unicode strings, compiler-evaluated defaults, nested structs, mixed tuples, native scalar maps, and native struct arrays. Blueprint tests compile and execute supported mappings through connected input and output pins. Additional tests cover malformed composite data, rejected signatures, runtime failures and output resets, logging and concurrent capture, graph reconstruction, transaction undo/redo, compiled Blueprint and native struct package save/load, embedded editor input, and syntax highlighting.
+The suite covers every supported scalar type and enum integer base, aliases, dynamic and fixed arrays, empty containers, integer boundaries, Unicode strings, compiler-evaluated defaults, nested structs, mixed tuples, native scalar and struct-valued maps, native struct arrays, and optional native individual struct pins. Blueprint tests compile and execute supported mappings through connected input and output pins. Additional tests cover native default editing/splitting, exported function selection, module graphs and imported types, malformed composite data, rejected signatures, runtime failures and output resets, logging and concurrent capture, graph reconstruction, transaction undo/redo, compiled Blueprint and native struct package save/load, embedded editor input, and syntax highlighting.
+
+For cooked validation, run the editor commandlet `-run=UEmkaCookFixture` in a disposable C++ host project, cook its `Content/UEmkaCookValidation` directory, and run its Development game with `-ExecCmds="Automation RunTests UEmka.Cooked.AssetExecution;SoftQuit"`. The commandlet creates fixture assets only when explicitly invoked; normal editor automation tests do not create game content.
 
 These are integration and regression tests for the plugin's supported interfaces, rather than exhaustive tests of the Umka language or a measured line-coverage guarantee. Platform-specific logging behavior still needs validation on each supported platform.
+
+## License
+
+Licensed under the [MIT License](LICENSE).

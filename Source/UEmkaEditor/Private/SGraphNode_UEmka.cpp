@@ -2,7 +2,11 @@
 
 #include "SGraphNode_UEmka.h"
 #include "K2Node_UEmka.h"
-#include "UEmkaFunctionLibrary.h"
+#include "UEmkaScriptAsset.h"
+#include "Editor.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/Input/SHyperlink.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
@@ -25,18 +29,50 @@ void SGraphNode_UEmka::Construct(const FArguments& InArgs, UK2Node_UEmka* InNode
 
 FText SGraphNode_UEmka::GetScriptText() const
 {
-	return UEmkaNode.IsValid() ? FText::FromString(UEmkaNode->Script) : FText::GetEmpty();
+	return UEmkaNode.IsValid() ? FText::FromString(UEmkaNode->GetScriptSource()) : FText::GetEmpty();
+}
+
+bool SGraphNode_UEmka::IsScriptReadOnly() const
+{
+	return UEmkaNode.IsValid() && UEmkaNode->ScriptAsset != nullptr;
+}
+
+FText SGraphNode_UEmka::GetSelectedFunctionText() const
+{
+	return UEmkaNode.IsValid() && !UEmkaNode->SelectedFunction.IsEmpty()
+		? FText::FromString(UEmkaNode->SelectedFunction) : LOCTEXT("AutomaticFunction", "Automatic (first export)");
+}
+
+void SGraphNode_UEmka::OnFunctionSelected(TSharedPtr<FString> Function, ESelectInfo::Type SelectInfo)
+{
+	if (!UEmkaNode.IsValid() || !Function.IsValid() || SelectInfo == ESelectInfo::Direct
+		|| UEmkaNode->SelectedFunction.Equals(*Function, ESearchCase::CaseSensitive))
+	{
+		return;
+	}
+	const FScopedTransaction Transaction(LOCTEXT("SelectFunction", "Select Umka Function"));
+	UEmkaNode->Modify();
+	UEmkaNode->SelectedFunction = *Function;
+	UEmkaNode->RefreshScript();
+}
+
+void SGraphNode_UEmka::OpenScriptAsset() const
+{
+	if (UEmkaNode.IsValid() && UEmkaNode->ScriptAsset && GEditor)
+	{
+		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(UEmkaNode->ScriptAsset);
+	}
 }
 
 void SGraphNode_UEmka::OnScriptTextCommitted(const FText& NewText, ETextCommit::Type CommitType) const
 {
-	if (!UEmkaNode.IsValid())
+	if (!UEmkaNode.IsValid() || IsScriptReadOnly())
 	{
 		return;
 	}
 
 	const FString NewScript = NewText.ToString();
-	if (UEmkaNode->Script == NewScript)
+	if (UEmkaNode->Script.Equals(NewScript, ESearchCase::CaseSensitive))
 	{
 		return;
 	}
@@ -56,7 +92,7 @@ void SGraphNode_UEmka::OnScriptTextCommitted(const FText& NewText, ETextCommit::
 
 void SGraphNode_UEmka::OnScriptTextChanged(const FText& NewText) const
 {
-	if (!UEmkaNode.IsValid())
+	if (!UEmkaNode.IsValid() || IsScriptReadOnly())
 	{
 		return;
 	}
@@ -65,7 +101,7 @@ void SGraphNode_UEmka::OnScriptTextChanged(const FText& NewText) const
 	// reflects the current text box content, not just the last committed value.
 	FString CompileError;
 	int32 ErrorLine = -1;
-	UUEmkaFunctionLibrary::CompileCheckScript(NewText.ToString(), CompileError, ErrorLine);
+	UEmkaNode->CompileCurrentScript(NewText.ToString(), CompileError, ErrorLine);
 	SyntaxHighlighter->SetErrorLine(ErrorLine);
 	if (CodeEditor.IsValid())
 	{
@@ -75,6 +111,10 @@ void SGraphNode_UEmka::OnScriptTextChanged(const FText& NewText) const
 
 FReply SGraphNode_UEmka::OnTextBoxKeyDown(const FGeometry& Geometry, const FKeyEvent& KeyEvent)
 {
+	if (IsScriptReadOnly())
+	{
+		return FReply::Unhandled();
+	}
 	if (KeyEvent.IsControlDown() && (KeyEvent.GetKey() == EKeys::Z || KeyEvent.GetKey() == EKeys::Y))
 	{
 		// Undo/redo doesn't fire OnTextChanged - schedule a one-shot deferred recheck so the error highlight is updated after the text reverts.
@@ -124,7 +164,7 @@ EActiveTimerReturnType SGraphNode_UEmka::RecheckAfterUndoRedo(double InCurrentTi
 	{
 		FString CompileError;
 		int32 ErrorLine = -1;
-		UUEmkaFunctionLibrary::CompileCheckScript(CodeEditor->GetPlainText().ToString(), CompileError, ErrorLine);
+		UEmkaNode->CompileCurrentScript(CodeEditor->GetPlainText().ToString(), CompileError, ErrorLine);
 		SyntaxHighlighter->SetErrorLine(ErrorLine);
 		CodeEditor->Invalidate(EInvalidateWidgetReason::Layout);
 	}
@@ -154,6 +194,24 @@ void SGraphNode_UEmka::UpdateGraphNode()
 	}
 
 	const TSharedPtr<SNodeTitle> NodeTitle = SNew(SNodeTitle, GraphNode);
+	ExportedFunctions.Reset();
+	ExportedFunctions.Add(MakeShared<FString>());
+	TSharedPtr<FString> SelectedFunction;
+	if (UEmkaNode.IsValid())
+	{
+		for (const FString& Function : UK2Node_UEmka::GetExportedFunctions(UEmkaNode->GetScriptSource()))
+		{
+			ExportedFunctions.Add(MakeShared<FString>(Function));
+		}
+		for (const TSharedPtr<FString>& Function : ExportedFunctions)
+		{
+			if (UEmkaNode->SelectedFunction.Equals(*Function, ESearchCase::CaseSensitive))
+			{
+				SelectedFunction = Function;
+				break;
+			}
+		}
+	}
 
 	// Code editor widget
 	const TSharedRef<SWidget> CodeWidget =
@@ -163,7 +221,9 @@ void SGraphNode_UEmka::UpdateGraphNode()
 		.MaxDesiredHeight(400.f)
 		[
 			SAssignNew(CodeEditor, SMultiLineEditableTextBox)
+			.Tag(TEXT("UEmka.ScriptEditor"))
 			.Text(this, &SGraphNode_UEmka::GetScriptText)
+			.IsReadOnly(this, &SGraphNode_UEmka::IsScriptReadOnly)
 			.OnTextCommitted(this, &SGraphNode_UEmka::OnScriptTextCommitted)
 			.OnTextChanged(this, &SGraphNode_UEmka::OnScriptTextChanged)
 			.OnKeyDownHandler(this, &SGraphNode_UEmka::OnTextBoxKeyDown)
@@ -252,7 +312,39 @@ void SGraphNode_UEmka::UpdateGraphNode()
 					.HAlign(HAlign_Fill)
 					.Padding(4.f, 4.f)
 					[
-						CodeWidget
+						SNew(SVerticalBox)
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(2.f, 0.f, 2.f, 4.f)
+						[
+							SNew(SComboBox<TSharedPtr<FString>>)
+							.OptionsSource(&ExportedFunctions)
+							.InitiallySelectedItem(SelectedFunction)
+							.OnGenerateWidget_Lambda([](TSharedPtr<FString> Function)
+							{
+								return SNew(STextBlock).Text(Function->IsEmpty()
+									? LOCTEXT("AutomaticFunction", "Automatic (first export)") : FText::FromString(*Function));
+							})
+							.OnSelectionChanged(this, &SGraphNode_UEmka::OnFunctionSelected)
+							[
+								SNew(STextBlock).Text(this, &SGraphNode_UEmka::GetSelectedFunctionText)
+							]
+						]
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						.Padding(2.f, 0.f, 2.f, 4.f)
+						[
+							SNew(SHyperlink)
+							.Visibility_Lambda([this]() { return IsScriptReadOnly() ? EVisibility::Visible : EVisibility::Collapsed; })
+							.Text_Lambda([this]() { return IsScriptReadOnly() ? FText::FromString(UEmkaNode->ScriptAsset->GetName()) : FText::GetEmpty(); })
+							.ToolTipText(LOCTEXT("OpenScriptAsset", "Open script asset"))
+							.OnNavigate(this, &SGraphNode_UEmka::OpenScriptAsset)
+						]
+						+ SVerticalBox::Slot()
+						.AutoHeight()
+						[
+							CodeWidget
+						]
 					]
 
 					// Right: output pins

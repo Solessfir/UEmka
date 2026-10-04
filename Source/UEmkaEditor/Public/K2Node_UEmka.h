@@ -4,6 +4,7 @@
 
 #include "K2Node.h"
 #include "UEmkaFunctionLibrary.h"
+#include "UEmkaScriptAsset.h"
 #include "K2Node_UEmka.generated.h"
 
 // A single parsed parameter from an Umka function signature.
@@ -65,7 +66,7 @@ struct FUEmkaShimParam
 	bool operator==(const FUEmkaShimParam&) const = default;
 };
 
-// Result of parsing the first exported function from a script.
+// Result of parsing the selected exported function from a script.
 struct FUEmkaSignature
 {
 	FString FunctionName;
@@ -119,8 +120,18 @@ public:
 	UPROPERTY()
 	FString Script = TEXT("fn Hello*(Str: str): str {\n    res := \"Hello \" + Str\n    printf(\"%s\", res)\n    return res\n}");
 
+	UPROPERTY(EditAnywhere, Category = "Umka")
+	TObjectPtr<UUEmkaScriptAsset> ScriptAsset;
+
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Exported function to call. Leave empty to use the first exported function."))
+	FString SelectedFunction;
+
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Use native Blueprint structs instead of flattening individual struct parameters and results."))
+	bool bNativeStructPins = false;
+
 	// UK2Node interface
 	virtual void AllocateDefaultPins() override;
+	virtual void PreloadRequiredAssets() override;
 
 	virtual FText GetNodeTitle(ENodeTitleType::Type TitleType) const override;
 
@@ -130,7 +141,7 @@ public:
 
 	virtual FSlateIcon GetIconAndTint(FLinearColor& OutColor) const override;
 
-	virtual bool ShouldShowNodeProperties() const override { return false; }
+	virtual bool ShouldShowNodeProperties() const override { return true; }
 
 	virtual bool IsNodePure() const override { return false; }
 
@@ -146,12 +157,20 @@ public:
 
 	virtual void PostEditUndo() override;
 
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
 	// Called by SGraphNode_UEmka when the code editor text is committed.
 	void OnScriptChanged(const FString& NewScript);
+	void RefreshScript();
+	void OnScriptAssetChanged(UUEmkaScriptAsset* ChangedAsset);
+	FString GetScriptSource() const;
+	bool CompileCurrentScript(const FString& Source, FString& OutError, int32& OutLine) const;
+	static TArray<FString> GetExportedFunctions(const FString& Source);
 
 	// Parse the first exported function signature from a script string.
 	// Public so SGraphNode_UEmka can call it for live preview.
-	static FUEmkaSignature ParseScript(const FString& InScript);
+	static FUEmkaSignature ParseScript(const FString& InScript, const FString& SelectedFunction = {}, const bool bNativeStructPins = false,
+		const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true);
 
 	// Returns the script that actually gets compiled and executed: the user script,
 	// plus the generated __uemka_call wrapper when the signature uses structs.
@@ -166,6 +185,8 @@ public:
 	mutable FString LastErrorMessage;
 
 private:
+	bool ResolveCurrentSource(FString& OutSource, FString& OutFileName, TArray<FUEmkaModuleSource>& OutModules, FString& OutError) const;
+	FUEmkaSignature ParseCurrentScript() const;
 	static TOptional<EUEmkaValueType> ParseUmkaType(const FString& TypeName);
 
 	static FEdGraphPinType GetPinTypeFor(EUEmkaValueType ValueType);

@@ -182,6 +182,8 @@ typedef void *(*UmkaEnsureMapItem)             (Umka *umka, UmkaMap *map, UmkaSt
 typedef int (*UmkaGetMapLen)                   (const UmkaMap *map);
 typedef bool (*UmkaMapVisitor)                 (UmkaStackSlot key, const void *value, void *user);
 typedef bool (*UmkaVisitMap)                   (const UmkaMap *map, UmkaMapVisitor visitor, void *user);
+typedef void (*UmkaSetFileImportsEnabled)      (Umka *umka, bool enabled);
+typedef const char *(*UmkaGetTypeNameInMainModule)(Umka *umka, const UmkaType *type);
 
 
 typedef struct
@@ -246,6 +248,8 @@ typedef struct
     UmkaEnsureMapItem   umkaEnsureMapItem;
     UmkaGetMapLen       umkaGetMapLen;
     UmkaVisitMap        umkaVisitMap;
+    UmkaSetFileImportsEnabled umkaSetFileImportsEnabled;
+    UmkaGetTypeNameInMainModule umkaGetTypeNameInMainModule;
 } UmkaAPI;
 
 
@@ -311,6 +315,10 @@ UMKA_API void *umkaEnsureMapItem            (Umka *umka, UmkaMap *map, UmkaStack
 UMKA_API int umkaGetMapLen                  (const UmkaMap *map);
 // Visitors borrow keys and values and must not modify the map during traversal.
 UMKA_API bool umkaVisitMap                  (const UmkaMap *map, UmkaMapVisitor visitor, void *user);
+// Set after initialization and before compilation. Registered and builtin sources remain available.
+UMKA_API void umkaSetFileImportsEnabled      (Umka *umka, bool enabled);
+// Returns a main-module-visible type name, qualified with its import alias when needed.
+UMKA_API const char *umkaGetTypeNameInMainModule(Umka *umka, const UmkaType *type);
 
 
 static inline UmkaAPI *umkaGetAPI(Umka *umka)

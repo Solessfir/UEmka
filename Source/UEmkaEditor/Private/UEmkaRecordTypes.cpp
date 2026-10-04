@@ -3,16 +3,78 @@
 #include "UEmkaRecordTypes.h"
 
 #include "EdGraphSchema_K2.h"
+#include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/StructureEditorUtils.h"
+#include "KismetCompilerMisc.h"
 #include "Misc/SecureHash.h"
+#include "Misc/StringOutputDevice.h"
 #include "StructUtils/UserDefinedStruct.h"
 #include "UEmkaFunctionLibrary.h"
 #include "UObject/Package.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/StrongObjectPtr.h"
+#include "UObject/UnrealType.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
 
 namespace
 {
 constexpr int32 MaxTypeDepth = 16;
+
+struct FScopedDefaultValue
+{
+	TStrongObjectPtr<UScriptStruct> Scope;
+	FProperty* Property = nullptr;
+	TUniquePtr<FStructOnScope> Value;
+
+	bool Initialize(const FEdGraphPinType& PinType, const FString& Text, FString& Error)
+	{
+		if ((!PinType.IsArray() && !PinType.IsMap() && PinType.PinCategory != UEdGraphSchema_K2::PC_Struct) || PinType.IsSet())
+		{
+			Error = TEXT("Expected a native record, array or map pin");
+			return false;
+		}
+		Scope.Reset(NewObject<UScriptStruct>(GetTransientPackage()));
+		FCompilerResultsLog Log;
+		Property = FKismetCompilerUtilities::CreatePropertyOnScope(Scope.Get(), TEXT("Value"), PinType, nullptr, CPF_None, GetDefault<UEdGraphSchema_K2>(), Log);
+		if (!Property || Log.NumErrors)
+		{
+			delete Property;
+			Property = nullptr;
+			Error = TEXT("Could not create native default storage for the pin type");
+			return false;
+		}
+		Scope->AddCppProperty(Property);
+		Scope->StaticLink(true);
+		Value = MakeUnique<FStructOnScope>(Scope.Get());
+		const FString Trimmed = Text.TrimStartAndEnd();
+		if (Trimmed.IsEmpty()) return true;
+		FStringOutputDevice ImportErrors;
+		const TCHAR* End = Property->ImportText_Direct(*Trimmed, GetData(), nullptr, PPF_SerializedAsImportText, &ImportErrors);
+		if (!End || !ImportErrors.IsEmpty())
+		{
+			Error = ImportErrors.IsEmpty() ? TEXT("Invalid native default value") : FString(ImportErrors);
+			return false;
+		}
+		while (FChar::IsWhitespace(*End)) ++End;
+		if (*End)
+		{
+			Error = TEXT("Native default value contains trailing text");
+			return false;
+		}
+		return true;
+	}
+
+	void* GetData() const { return Property->ContainerPtrToValuePtr<void>(Value->GetStructMemory()); }
+};
+
+TUniquePtr<FStructProperty> MakeStructProperty(UScriptStruct* Struct)
+{
+	// FField's operator new initializes class metadata used by CastField during composite conversion.
+	TUniquePtr<FStructProperty> Property = MakeUnique<FStructProperty>(nullptr, NAME_None);
+	Property->Struct = Struct;
+	Property->SetElementSize(Struct->GetStructureSize());
+	return Property;
+}
 
 FEdGraphPinType ScalarPinType(const EUEmkaValueType Type)
 {
@@ -97,9 +159,9 @@ FEdGraphPinType ResolvePinType(const FUEmkaCompiledValue& Value, UObject* Owner,
 		if (!OutError.IsEmpty()) return {};
 		const FEdGraphPinType ValueType = ResolvePinType(Value.Fields[1], Owner, OutError, Depth + 1);
 		if (!OutError.IsEmpty()) return {};
-		if (KeyType.ContainerType != EPinContainerType::None || ValueType.ContainerType != EPinContainerType::None || Value.Fields[1].bIsStruct)
+		if (KeyType.ContainerType != EPinContainerType::None || ValueType.ContainerType != EPinContainerType::None || Value.Fields[0].bIsStruct)
 		{
-			OutError = TEXT("Blueprint maps require scalar keys and values");
+			OutError = TEXT("Blueprint maps require scalar keys and scalar or record values");
 			return {};
 		}
 		KeyType.ContainerType = EPinContainerType::Map;
@@ -187,4 +249,60 @@ FEdGraphPinType UEmkaRecordTypes::GetPinType(const FUEmkaCompiledValue& Value, U
 {
 	OutError.Reset();
 	return ResolvePinType(Value, Owner, OutError, 0);
+}
+
+bool UEmkaRecordTypes::GetDefaultValue(const FUEmkaCompiledValue& Value, const FEdGraphPinType& PinType, FString& OutValue, FString& OutError)
+{
+	OutValue.Reset();
+	OutError.Reset();
+	UScriptStruct* Struct = Cast<UScriptStruct>(PinType.PinSubCategoryObject.Get());
+	if (!Value.bHasDefault || !Value.bIsStruct || Value.DefaultCompositeValue.IsEmpty()
+		|| PinType.PinCategory != UEdGraphSchema_K2::PC_Struct || PinType.IsContainer() || !Struct)
+	{
+		OutError = TEXT("Expected a native record pin with a compiled default value");
+		return false;
+	}
+	const TUniquePtr<FStructProperty> Property = MakeStructProperty(Struct);
+	FStructOnScope Default(Struct);
+	FUEmkaScriptParam Packet;
+	Packet.Type = EUEmkaValueType::Composite;
+	Packet.CompositeValue = Value.DefaultCompositeValue;
+	if (!UUEmkaFunctionLibrary::DecodeComposite(Packet, Property.Get(), Default.GetStructMemory(), OutError)) return false;
+	Struct->ExportText(OutValue, Default.GetStructMemory(), Default.GetStructMemory(), nullptr, PPF_SerializedAsImportText, nullptr);
+	return true;
+}
+
+bool UEmkaRecordTypes::EncodeDefaultValue(const FEdGraphPinType& PinType, const FString& Value, TArray<uint8>& OutBytes, FString& OutError)
+{
+	OutBytes.Reset();
+	OutError.Reset();
+	FScopedDefaultValue Default;
+	if (!Default.Initialize(PinType, Value, OutError)) return false;
+	FUEmkaScriptParam Packet;
+	if (!UUEmkaFunctionLibrary::EncodeComposite(Default.Property, Default.GetData(), Packet, OutError)) return false;
+	OutBytes = MoveTemp(Packet.CompositeValue);
+	return true;
+}
+
+bool UEmkaRecordTypes::GetFieldDefaultValue(const FEdGraphPinType& ParentPinType, const FString& ParentText, const FName FieldName, FString& OutText, FString& OutError)
+{
+	OutText.Reset();
+	OutError.Reset();
+	UScriptStruct* Struct = Cast<UScriptStruct>(ParentPinType.PinSubCategoryObject.Get());
+	if (ParentPinType.PinCategory != UEdGraphSchema_K2::PC_Struct || ParentPinType.IsContainer() || !Struct)
+	{
+		OutError = TEXT("Expected a native parent record pin");
+		return false;
+	}
+	FScopedDefaultValue Default;
+	if (!Default.Initialize(ParentPinType, ParentText, OutError)) return false;
+	FProperty* Field = Struct->FindPropertyByName(FieldName);
+	if (!Field)
+	{
+		OutError = FString::Printf(TEXT("Native record default has no field '%s'"), *FieldName.ToString());
+		return false;
+	}
+	const void* FieldData = Field->ContainerPtrToValuePtr<void>(Default.GetData());
+	Field->ExportTextItem_Direct(OutText, FieldData, nullptr, nullptr, PPF_SerializedAsImportText);
+	return true;
 }

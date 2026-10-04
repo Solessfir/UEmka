@@ -838,7 +838,18 @@ static void parseImportItem(Umka *umka)
     }
 
     if (!sourceString)
+    {
         moduleAssertRegularizePath(&umka->modules, umka->lex.tok.strVal, umka->modules.module[umka->blocks.module]->folder, path, DEFAULT_STR_LEN + 1);
+        const ModuleSource *sourceDesc = moduleFindSource(&umka->modules, path);
+        if (sourceDesc)
+        {
+            sourceString = sourceDesc->source;
+            sourceTrusted = sourceDesc->trusted;
+        }
+    }
+
+    if (!sourceString && !umka->modules.fileImportsEnabled)
+        umka->modules.error->handler(umka->modules.error->context, "Module %s is not registered; filesystem imports are disabled", umka->lex.tok.strVal);
 
     char folder[DEFAULT_STR_LEN + 1] = "";
     char name  [DEFAULT_STR_LEN + 1] = "";

@@ -4,6 +4,8 @@
 #include "EdGraphUtilities.h"
 #include "K2Node_UEmka.h"
 #include "SGraphNode_UEmka.h"
+#include "UEmkaScriptAsset.h"
+#include "UObject/UObjectIterator.h"
 
 #define LOCTEXT_NAMESPACE "FUEmkaEditorModule"
 
@@ -24,10 +26,21 @@ void FUEmkaEditorModule::StartupModule()
 {
 	NodeFactory = MakeShareable(new FUEmkaNodeFactory());
 	FEdGraphUtilities::RegisterVisualNodeFactory(NodeFactory);
+	ScriptAssetChangedHandle = UUEmkaScriptAsset::OnScriptAssetChanged.AddLambda([](UUEmkaScriptAsset* Asset)
+	{
+		for (TObjectIterator<UK2Node_UEmka> Node; Node; ++Node)
+		{
+			if (!Node->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject | RF_NeedLoad | RF_NeedPostLoad))
+			{
+				Node->OnScriptAssetChanged(Asset);
+			}
+		}
+	});
 }
 
 void FUEmkaEditorModule::ShutdownModule()
 {
+	UUEmkaScriptAsset::OnScriptAssetChanged.Remove(ScriptAssetChangedHandle);
 	FEdGraphUtilities::UnregisterVisualNodeFactory(NodeFactory);
 	NodeFactory.Reset();
 }

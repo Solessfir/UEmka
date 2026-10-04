@@ -147,7 +147,8 @@ struct FBlueprintFunction
 
 bool BuildFunction(FAutomationTestBase& Test, const FString& Label, const FString& Script,
 	const TArray<FInput>& Inputs, const int32 NumOutputs, FBlueprintFunction& Built,
-	const TMap<FName, FString>& Defaults = {}, UPackage* Package = GetTransientPackage())
+	const TMap<FName, FString>& Defaults = {}, UPackage* Package = GetTransientPackage(),
+	const TFunction<void(UK2Node_UEmka*)>& Configure = {})
 {
 	FString Error;
 	int32 Line = -1;
@@ -172,6 +173,7 @@ bool BuildFunction(FAutomationTestBase& Test, const FString& Label, const FStrin
 	Graph->AddNode(Built.Node);
 	Built.Node->CreateNewGuid();
 	Built.Node->Script = Script;
+	if (Configure) Configure(Built.Node);
 	Built.Node->AllocateDefaultPins();
 	const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
 	if (!Test.TestTrue(Label + TEXT(" entry execution"), Schema->TryCreateConnection(Entry->GetThenPin(), Built.Node->GetExecPin()))
@@ -563,6 +565,78 @@ bool FUEmkaNativeContainerPersistenceTest::RunTest(const FString& Parameters)
 	Built.Blueprint->ClearFlags(RF_Standalone);
 	IFileManager::Get().Delete(*Filename);
 	return bPassed;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaNativeStructExecutionTest, "UEmka.Editor.Advanced.NativeStructPins", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaNativeStructExecutionTest::RunTest(const FString& Parameters)
+{
+	const FString Declaration = TEXT("type Detail = struct { Label: str; Weight: real32 }\n")
+		TEXT("type Row = struct { Id: int8; Info: Detail; Flags: [2]bool; Children: []Detail; Entries: map[str]Detail }\n");
+	const FNativeValue Detail = Record({TEXT("Label"), TEXT("Weight")}, {Str(TEXT("世界 🚀")), Real(1.25)});
+	const FNativeValue Row = Record({TEXT("Id"), TEXT("Info"), TEXT("Flags"), TEXT("Children"), TEXT("Entries")},
+		{Int(-7), Detail, Array({Bool(true), Bool(false)}), Array({Detail}), Map({Str(TEXT("first")), Detail})});
+	const FNativeValue Empty = Record({TEXT("Id"), TEXT("Info"), TEXT("Flags"), TEXT("Children"), TEXT("Entries")},
+		{Int(0), Record({TEXT("Label"), TEXT("Weight")}, {Str(TEXT("")), Real(0)}), Array({Bool(false), Bool(false)}), Array({}), Map({})});
+	const auto Configure = [](UK2Node_UEmka* Node) { Node->bNativeStructPins = true; Node->SelectedFunction = TEXT("Run"); };
+	for (const bool bTuple : {false, true})
+	{
+		const FString Script = Declaration + TEXT("fn First*(): int { return -1 }\n")
+			+ (bTuple ? TEXT("fn Run*(Input: Row): (Row, int, Row) { return Input, 17, Input }")
+				: TEXT("fn Run*(Input: Row): Row { return Input }"));
+		FBlueprintFunction Built;
+		if (!BuildFunction(*this, TEXT("Native whole record"), Script, {{TEXT("Input"), Row}}, bTuple ? 3 : 1, Built, {}, GetTransientPackage(), Configure)) continue;
+		TestFalse(TEXT("Native records avoid generated flattening wrappers"), UK2Node_UEmka::ParseScript(Script, TEXT("Run"), true).bNeedsShim);
+		Invoke(*this, TEXT("Populated native record"), Built, {{TEXT("Input"), Row}}, bTuple ? TArray<FNativeValue>{Row, Int(17), Row} : TArray<FNativeValue>{Row});
+		Invoke(*this, TEXT("Empty native record containers"), Built, {{TEXT("Input"), Empty}}, bTuple ? TArray<FNativeValue>{Empty, Int(17), Empty} : TArray<FNativeValue>{Empty});
+	}
+	for (const bool bMap : {false, true})
+	{
+		const FString Type = bMap ? TEXT("map[str]Row") : TEXT("[]Row");
+		FBlueprintFunction Built;
+		if (BuildFunction(*this, TEXT("Unconnected native container"), Declaration
+			+ FString::Printf(TEXT("fn Run*(Input: %s): %s { return Input }"), *Type, *Type), {}, 1, Built, {}, GetTransientPackage(), Configure))
+		{
+			Invoke(*this, TEXT("Empty literal native container"), Built, {}, {bMap ? Map({}) : Array({})});
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaNativeStructDefaultsExecutionTest, "UEmka.Editor.Advanced.NativeStructDefaults", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaNativeStructDefaultsExecutionTest::RunTest(const FString& Parameters)
+{
+	const FString Script = TEXT("type Child = struct { Label: str }\n")
+		TEXT("type Row = struct { Number: int; Detail: Child; Samples: [2]int }\n")
+		TEXT("fn Run*(Input: Row = Row{73, Child{\"compiler\"}, [2]int{3, 5}}): Row { return Input }");
+	const FNativeValue Original = Record({TEXT("Number"), TEXT("Detail"), TEXT("Samples")},
+		{Int(73), Record({TEXT("Label")}, {Str(TEXT("compiler"))}), Array({Int(3), Int(5)})});
+	const FNativeValue Edited = Record({TEXT("Number"), TEXT("Detail"), TEXT("Samples")},
+		{Int(73), Record({TEXT("Label")}, {Str(TEXT("edited"))}), Array({Int(3), Int(5)})});
+	for (const bool bSplit : {false, true})
+	{
+		FBlueprintFunction Built;
+		if (!BuildFunction(*this, TEXT("Native record compiler default"), Script, {}, 1, Built, {}, GetTransientPackage(),
+			[](UK2Node_UEmka* Node) { Node->bNativeStructPins = true; })) continue;
+		Invoke(*this, TEXT("Unconnected native compiler default"), Built, {}, {Original});
+		const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+		UEdGraphPin* Input = Built.Node->FindPinChecked(TEXT("Input"), EGPD_Input);
+		Schema->TrySetDefaultValue(*Input, Input->DefaultValue.Replace(TEXT("compiler"), TEXT("edited")));
+		if (bSplit)
+		{
+			Schema->SplitPin(Input, false);
+			TestFalse(TEXT("Native input can split into standard Blueprint fields"), Input->SubPins.IsEmpty());
+		}
+		FCompilerResultsLog Log;
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Built.Blueprint);
+		FKismetEditorUtilities::CompileBlueprint(Built.Blueprint, EBlueprintCompileOptions::SkipGarbageCollection, &Log);
+		if (!TestEqual(TEXT("Edited native default compiles"), Log.NumErrors, 0)) continue;
+		Built.Function = Built.Blueprint->GeneratedClass->FindFunctionByName(TEXT("ExecuteAdvanced"));
+		Built.Instance = NewObject<UObject>(GetTransientPackage(), Built.Blueprint->GeneratedClass);
+		Invoke(*this, bSplit ? TEXT("Split native default executes") : TEXT("Edited native default executes"), Built, {}, {Edited});
+	}
+	return true;
 }
 
 #endif

@@ -7,6 +7,7 @@
 #include "umka_api.h"
 #include "HAL/CriticalSection.h"
 #include "Misc/ScopeLock.h"
+#include "Misc/ScopeExit.h"
 #include UE_INLINE_GENERATED_CPP_BY_NAME(UEmkaFunctionLibrary)
 
 #define UEMKA_CAPTURE_STDOUT ((PLATFORM_WINDOWS || PLATFORM_UNIX || PLATFORM_MAC) && !NO_LOGGING)
@@ -74,14 +75,14 @@ static bool GetCompiledScalarType(const UmkaType* Type, EUEmkaValueType& OutType
 	return false;
 }
 
-static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int32 Depth = 0)
+static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int32 Depth = 0, Umka* VM = nullptr)
 {
 	FUEmkaCompiledValue Value;
 	if (!Type)
 	{
 		return Value;
 	}
-	const char* DeclaredName = umkaGetTypeName(Type);
+	const char* DeclaredName = VM ? umkaGetTypeNameInMainModule(VM, Type) : umkaGetTypeName(Type);
 	const char* KindName = umkaGetTypeKindName(Type);
 	Value.TypeName = DeclaredName ? UTF8_TO_TCHAR(DeclaredName) : (KindName ? UTF8_TO_TCHAR(KindName) : TEXT(""));
 	Value.bIsEnum = umkaIsEnumType(Type);
@@ -103,7 +104,7 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 	}
 	if (Value.bIsArray)
 	{
-		const FUEmkaCompiledValue Element = DescribeCompiledValue(umkaGetBaseType(Type), Depth + 1);
+		const FUEmkaCompiledValue Element = DescribeCompiledValue(umkaGetBaseType(Type), Depth + 1, VM);
 		Value.Type = Element.bIsStruct ? EUEmkaValueType::Composite : Element.Type;
 		Value.bIsEnum = Element.bIsEnum;
 		Value.EnumByteSize = Element.EnumByteSize;
@@ -121,11 +122,11 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 	if (Value.bIsMap)
 	{
 		Value.Type = EUEmkaValueType::Composite;
-		Value.Fields = {DescribeCompiledValue(umkaGetMapKeyType(Type), Depth + 1), DescribeCompiledValue(umkaGetMapItemType(Type), Depth + 1)};
+		Value.Fields = {DescribeCompiledValue(umkaGetMapKeyType(Type), Depth + 1, VM), DescribeCompiledValue(umkaGetMapItemType(Type), Depth + 1, VM)};
 		const FUEmkaCompiledValue& Key = Value.Fields[0];
 		const FUEmkaCompiledValue& Item = Value.Fields[1];
 		Value.bSupported = Key.bSupported && Item.bSupported && !Key.bIsArray && !Key.bIsStruct && !Key.bIsMap
-			&& !Item.bIsArray && !Item.bIsStruct && !Item.bIsMap && Item.Type != EUEmkaValueType::Void
+			&& !Item.bIsArray && !Item.bIsMap && !Item.bIsTuple && Item.Type != EUEmkaValueType::Void
 			&& (Key.Type <= EUEmkaValueType::UInt || Key.Type == EUEmkaValueType::Str);
 		if (!DeclaredName) Value.TypeName = TEXT("map[") + Key.TypeName + TEXT("]") + Item.TypeName;
 		return Value;
@@ -137,7 +138,7 @@ static FUEmkaCompiledValue DescribeCompiledValue(const UmkaType* Type, const int
 		TArray<FString> FieldTypeNames;
 		for (int32 Index = 0; Index < umkaGetFieldCount(Type); ++Index)
 		{
-			FUEmkaCompiledValue Field = DescribeCompiledValue(umkaGetFieldTypeByIndex(Type, Index), Depth + 1);
+			FUEmkaCompiledValue Field = DescribeCompiledValue(umkaGetFieldTypeByIndex(Type, Index), Depth + 1, VM);
 			if (const char* FieldName = umkaGetFieldNameByIndex(Type, Index))
 			{
 				Field.Name = UTF8_TO_TCHAR(FieldName);
@@ -314,11 +315,57 @@ static void ReadDynArrayResult(const FUmkaDynArrayHeader& Header, const EUEmkaVa
 	ReadArrayResult(Header.data, umkaGetDynArrayLen(&Header), Type, Out);
 }
 
+static void ReleaseUmkaResult(Umka* VM, const UmkaType* Type, const void* Data)
+{
+	if (!Type || !Data) return;
+	const char* Kind = umkaGetTypeKindName(Type);
+	if (Kind && FCStringAnsi::Strcmp(Kind, "str") == 0)
+	{
+		void* String;
+		FMemory::Memcpy(&String, Data, sizeof(String));
+		umkaDecRef(VM, String);
+	}
+	else if (umkaIsDynArrayType(Type))
+	{
+		FUmkaDynArrayHeader Header;
+		FMemory::Memcpy(&Header, Data, sizeof(Header));
+		umkaDecRef(VM, Header.data);
+	}
+	else if (Kind && FCStringAnsi::Strcmp(Kind, "map") == 0)
+	{
+		UmkaMap Map;
+		FMemory::Memcpy(&Map, Data, sizeof(Map));
+		umkaDecRef(VM, Map.root);
+	}
+	else if (umkaIsStaticArrayType(Type))
+	{
+		const UmkaType* Element = umkaGetBaseType(Type);
+		const int32 ElementSize = umkaGetTypeSize(Element);
+		for (int32 Index = 0; Index < umkaGetArrayLen(Type); ++Index)
+		{
+			ReleaseUmkaResult(VM, Element, static_cast<const uint8*>(Data) + Index * ElementSize);
+		}
+	}
+	else
+	{
+		for (int32 Index = 0; Index < umkaGetFieldCount(Type); ++Index)
+		{
+			ReleaseUmkaResult(VM, umkaGetFieldTypeByIndex(Type, Index), static_cast<const uint8*>(Data) + umkaGetFieldOffsetByIndex(Type, Index));
+		}
+	}
+}
+
 static void SetCompiledDefault(FUEmkaCompiledValue& Value, const UmkaType* Type, const void* Data)
 {
 	Value.bHasDefault = true;
 	if (Value.bIsStruct)
 	{
+		FString Error;
+		if (!UEmkaComposite::ReadUmka(Type, Data, Value.DefaultCompositeValue, Error))
+		{
+			Value.bSupported = false;
+			return;
+		}
 		for (int32 Index = 0; Index < Value.Fields.Num(); ++Index)
 		{
 			SetCompiledDefault(Value.Fields[Index], umkaGetFieldTypeByIndex(Type, Index),
@@ -694,16 +741,17 @@ struct FUmkaScopedVM
 	UmkaFuncContext Context = {};
 	const UmkaType* FunctionType = nullptr;
 	FString Error;
+	int32 ErrorLine = -1;
 
-	FUmkaScopedVM(const FString& Script, const FString& FunctionName)
+	FUmkaScopedVM(const FString& Script, const FString& FunctionName, const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true, const bool bResolveFunction = true)
 	{
-		if (FunctionName.IsEmpty())
+		if (bResolveFunction && FunctionName.IsEmpty())
 		{
 			Error = TEXT("No function name provided");
 			return;
 		}
 
-		if (Script.IsEmpty())
+		if (bResolveFunction && Script.IsEmpty())
 		{
 			Error = TEXT("No script provided");
 			return;
@@ -716,17 +764,28 @@ struct FUmkaScopedVM
 			return;
 		}
 
-		if (!umkaInit(VM, "script.um", TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
+		if (!umkaInit(VM, TCHAR_TO_UTF8(*FileName), TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
 		{
-			Error = TEXT("Umka failed to initialize");
+			Error = FormatUmkaError(VM, TEXT("Umka failed to initialize"));
 			return;
+		}
+		umkaSetFileImportsEnabled(VM, bAllowFileImports);
+		for (const FUEmkaModuleSource& Module : Modules)
+		{
+			if (!umkaAddModule(VM, TCHAR_TO_UTF8(*Module.FileName), TCHAR_TO_UTF8(*Module.Source)))
+			{
+				Error = FString::Printf(TEXT("Failed to register Umka module '%s': %s"), *Module.FileName, *FormatUmkaError(VM, TEXT("duplicate or invalid module path")));
+				return;
+			}
 		}
 
 		if (!umkaCompile(VM))
 		{
+			if (const UmkaError* CompileError = umkaGetError(VM)) ErrorLine = CompileError->line;
 			Error = FormatUmkaError(VM, TEXT("Umka compile error"));
 			return;
 		}
+		if (!bResolveFunction) return;
 
 		if (!umkaGetFunc(VM, nullptr, TCHAR_TO_UTF8(*FunctionName), &Context))
 		{
@@ -753,19 +812,33 @@ struct FUmkaScopedVM
 	{
 		return VM && Error.IsEmpty();
 	}
+
+	void ReleaseParameters() const
+	{
+		for (int32 Index = 0; Index < umkaGetFuncParamCount(FunctionType); ++Index)
+		{
+			ReleaseUmkaResult(VM, umkaGetParamType(Context.params, Index), umkaGetParam(Context.params, Index));
+		}
+	}
 };
 
-bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error)
+static bool RunUmkaScript(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
 {
 	Result = FUEmkaScriptParam{};
 	Error.Reset();
 
-	FUmkaScopedVM Vm(Script, FunctionName);
+	FUmkaScopedVM Vm(Script, FunctionName, Modules, FileName, bAllowFileImports);
 	if (!Vm.IsValid())
 	{
 		Error = Vm.Error;
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
+	bool bParamsTransferred = false;
+	ON_SCOPE_EXIT
+	{
+		// Context parameter storage starts zeroed; the VM owns parameters once a call begins.
+		if (!bParamsTransferred) Vm.ReleaseParameters();
+	};
 
 	// Push parameters - ArrayHeaders must outlive umkaCall() (Umka holds raw pointers)
 	TArray<FUmkaDynArrayHeader> ArrayHeaders;
@@ -818,7 +891,19 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 	FUmkaStdoutCapture StdoutCapture;
 	#endif
 
+	bParamsTransferred = true;
 	const bool bSuccess = umkaCall(Vm.VM, &Vm.Context) == 0;
+	ON_SCOPE_EXIT
+	{
+		// Native callers own managed return values after copying them out of the VM.
+		if (bSuccess)
+		{
+			const void* Data = bCompositeResult ? static_cast<const void*>(CompositeResult.GetData())
+				: (bCompiledStaticArray ? static_cast<const void*>(StaticArrayResult.GetData())
+					: (bCompiledDynArray ? static_cast<const void*>(&DynArrayResult) : static_cast<const void*>(Vm.Context.result)));
+			ReleaseUmkaResult(Vm.VM, CompiledResultType, Data);
+		}
+	};
 
 	#if UEMKA_CAPTURE_STDOUT
 	StdoutCapture.FlushToLog(FunctionName);
@@ -903,7 +988,7 @@ bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script
 // Multi-return helpers (shared with RunUmkaInlineMulti)
 // -------------------------------------------------------------------------
 
-bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error)
+static bool RunUmkaScriptMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
 {
 	Results.Reset();
 	Error.Reset();
@@ -936,12 +1021,17 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
 
-	FUmkaScopedVM Vm(Script, FunctionName);
+	FUmkaScopedVM Vm(Script, FunctionName, Modules, FileName, bAllowFileImports);
 	if (!Vm.IsValid())
 	{
 		Error = Vm.Error;
 		return LogUmkaFailure(Caller, FunctionName, Error);
 	}
+	bool bParamsTransferred = false;
+	ON_SCOPE_EXIT
+	{
+		if (!bParamsTransferred) Vm.ReleaseParameters();
+	};
 
 	// Push parameters - ArrayHeaders must outlive umkaCall() (Umka holds raw pointers)
 	TArray<FUmkaDynArrayHeader> ArrayHeaders;
@@ -998,7 +1088,12 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 	FUmkaStdoutCapture StdoutCapture;
 	#endif
 
+	bParamsTransferred = true;
 	const bool bSuccess = umkaCall(Vm.VM, &Vm.Context) == 0;
+	ON_SCOPE_EXIT
+	{
+		if (bSuccess) ReleaseUmkaResult(Vm.VM, CompiledResultType, StructBuffer.GetData());
+	};
 
 	#if UEMKA_CAPTURE_STDOUT
 	StdoutCapture.FlushToLog(FunctionName);
@@ -1079,15 +1174,45 @@ bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& S
 	return bSuccess;
 }
 
+bool UUEmkaFunctionLibrary::RunUmkaInline(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error)
+{
+	return RunUmkaScript(Caller, Script, FunctionName, Params, ResultType, bResultIsArray, bResultIsStaticArray, Result, Error, {}, TEXT("script.um"), true);
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaInlineMulti(UObject* Caller, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error)
+{
+	return RunUmkaScriptMulti(Caller, Script, FunctionName, Params, ResultTypes, Results, Error, {}, TEXT("script.um"), true);
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaAsset(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const EUEmkaValueType ResultType, const bool bResultIsArray, const bool bResultIsStaticArray, FUEmkaScriptParam& Result, FString& Error)
+{
+	Result = {};
+	FString Source;
+	FString FileName;
+	TArray<FUEmkaModuleSource> Modules;
+	if (!UUEmkaScriptAsset::ResolveAsset(Asset, Source, FileName, Modules, Error)) return LogUmkaFailure(Caller, FunctionName, Error);
+	return RunUmkaScript(Caller, Script, FunctionName, Params, ResultType, bResultIsArray, bResultIsStaticArray, Result, Error, Modules, FileName, false);
+}
+
+bool UUEmkaFunctionLibrary::RunUmkaAssetMulti(UObject* Caller, UUEmkaScriptAsset* Asset, const FString& Script, const FString& FunctionName, const TArray<FUEmkaScriptParam>& Params, const FString& ResultTypes, TArray<FUEmkaScriptParam>& Results, FString& Error)
+{
+	Results.Reset();
+	FString Source;
+	FString FileName;
+	TArray<FUEmkaModuleSource> Modules;
+	if (!UUEmkaScriptAsset::ResolveAsset(Asset, Source, FileName, Modules, Error)) return LogUmkaFailure(Caller, FunctionName, Error);
+	return RunUmkaScriptMulti(Caller, Script, FunctionName, Params, ResultTypes, Results, Error, Modules, FileName, false);
+}
+
 FUEmkaScriptParam UUEmkaFunctionLibrary::GetMultiResultAt(const TArray<FUEmkaScriptParam>& Results, const int32 Index)
 {
 	return Results.IsValidIndex(Index) ? Results[Index] : FUEmkaScriptParam{};
 }
 
-bool UUEmkaFunctionLibrary::InspectScriptFunction(const FString& Script, const FString& FunctionName, FUEmkaCompiledSignature& OutSignature)
+bool UUEmkaFunctionLibrary::InspectScriptFunction(const FString& Script, const FString& FunctionName, FUEmkaCompiledSignature& OutSignature, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
 {
 	OutSignature = FUEmkaCompiledSignature{};
-	FUmkaScopedVM Vm(Script, FunctionName);
+	FUmkaScopedVM Vm(Script, FunctionName, Modules, FileName, bAllowFileImports);
 	if (!Vm.IsValid() || !Vm.FunctionType)
 	{
 		return false;
@@ -1096,7 +1221,7 @@ bool UUEmkaFunctionLibrary::InspectScriptFunction(const FString& Script, const F
 	for (int32 Index = 0; Index < ParamCount; ++Index)
 	{
 		const UmkaType* ParamType = umkaGetFuncParamTypeByIndex(Vm.FunctionType, Index);
-		FUEmkaCompiledValue Param = DescribeCompiledValue(ParamType);
+		FUEmkaCompiledValue Param = DescribeCompiledValue(ParamType, 0, Vm.VM);
 		UmkaStackSlot Default = {};
 		if (Param.bSupported && umkaGetFuncParamDefaultValue(Vm.FunctionType, Index, &Default))
 		{
@@ -1111,7 +1236,7 @@ bool UUEmkaFunctionLibrary::InspectScriptFunction(const FString& Script, const F
 		}
 		OutSignature.Params.Add(MoveTemp(Param));
 	}
-	OutSignature.Result = DescribeCompiledValue(umkaGetFuncResultType(Vm.FunctionType));
+	OutSignature.Result = DescribeCompiledValue(umkaGetFuncResultType(Vm.FunctionType), 0, Vm.VM);
 	return true;
 }
 
@@ -1208,37 +1333,19 @@ FUEmkaScriptParam UUEmkaFunctionLibrary::MakeCompositeDefaultParam(const FString
 	return Result;
 }
 
-bool UUEmkaFunctionLibrary::CompileCheckScript(const FString& Script, FString& OutError, int32& OutLine)
+bool UUEmkaFunctionLibrary::CompileCheckScript(const FString& Script, FString& OutError, int32& OutLine, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, const bool bAllowFileImports)
 {
-	OutError.Empty();
-	OutLine = -1;
-
-	Umka* UmkaInst = umkaAlloc();
-	if (!UmkaInst)
+	FUmkaScopedVM Vm(Script, FString(), Modules, FileName, bAllowFileImports, false);
+	OutError = Vm.Error;
+	OutLine = Vm.ErrorLine;
+	if (!Vm.IsValid() && OutLine >= 0 && Modules.IsEmpty() && FileName == TEXT("script.um") && bAllowFileImports)
 	{
-		OutError = TEXT("umkaAlloc failed");
-		return false;
-	}
-
-	if (!umkaInit(UmkaInst, "script.um", TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
-	{
-		OutError = TEXT("Umka failed to initialize");
-		umkaFree(UmkaInst);
-		return false;
-	}
-
-	const bool bOk = umkaCompile(UmkaInst) != 0;
-	if (!bOk)
-	{
-		if (const UmkaError* Err = umkaGetError(UmkaInst))
+		if (const UmkaError* Error = umkaGetError(Vm.VM))
 		{
-			OutLine = Err->line;
-			OutError = FString::Format(TEXT("Line {0}: {1}"), {Err->line, UTF8_TO_TCHAR(Err->msg)});
+			OutError = FString::Format(TEXT("Line {0}: {1}"), {Error->line, UTF8_TO_TCHAR(Error->msg)});
 		}
 	}
-
-	umkaFree(UmkaInst);
-	return bOk;
+	return Vm.IsValid();
 }
 
 // -------------------------------------------------------------------------

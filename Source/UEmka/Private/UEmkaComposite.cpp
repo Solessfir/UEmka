@@ -3,6 +3,9 @@
 #include "UEmkaComposite.h"
 #include "Serialization/MemoryReader.h"
 #include "Serialization/MemoryWriter.h"
+#include "UObject/EnumProperty.h"
+#include "UObject/StrProperty.h"
+#include "UObject/TextProperty.h"
 #include "UObject/UnrealType.h"
 
 namespace
@@ -214,7 +217,8 @@ namespace
 			int32 Count = 0;
 			for (TFieldIterator<FProperty> It(Struct->Struct); It; ++It)
 			{
-				const int32 Index = Value.Names.IndexOfByKey(It->GetAuthoredName());
+				const FString Name = It->GetAuthoredName();
+				const int32 Index = Value.Names.IndexOfByPredicate([&Name](const FString& FieldName) { return FieldName.Equals(Name, ESearchCase::CaseSensitive); });
 				if (Index == INDEX_NONE) return Fail(Error, TEXT("Composite struct is missing a reflected field."));
 				if (!ToProperty(Value.Children[Index], *It, It->ContainerPtrToValuePtr<void>(Data), Error)) return false;
 				++Count;
@@ -403,7 +407,7 @@ namespace
 			if (Value.Kind != EKind::Map) return Fail(Error, TEXT("Expected a composite map."));
 			const UmkaType* KeyType = umkaGetMapKeyType(Type);
 			const UmkaType* ItemType = umkaGetMapItemType(Type);
-			if ((!IsUmkaInteger(KeyType) && !KindIs(KeyType, "str")) || (!IsUmkaInteger(ItemType) && !KindIs(ItemType, "real") && !KindIs(ItemType, "real32") && !KindIs(ItemType, "str"))) return Fail(Error, TEXT("Composite maps require string or integer keys and scalar values."));
+			if ((!IsUmkaInteger(KeyType) && !KindIs(KeyType, "str")) || (!IsUmkaInteger(ItemType) && !KindIs(ItemType, "real") && !KindIs(ItemType, "real32") && !KindIs(ItemType, "str") && !KindIs(ItemType, "struct"))) return Fail(Error, TEXT("Composite maps require string or integer keys and scalar or record values."));
 			TSet<FString> StringKeys;
 			TSet<uint64> IntegerKeys;
 			for (int32 Index = 0; Index < Value.Children.Num(); Index += 2)
@@ -427,7 +431,8 @@ namespace
 		for (int32 Index = 0; Index < Count; ++Index)
 		{
 			const char* Name = umkaGetFieldNameByIndex(Type, Index);
-			const int32 SourceIndex = Name ? Value.Names.IndexOfByKey(FString(UTF8_TO_TCHAR(Name))) : INDEX_NONE;
+			const FString FieldName = Name ? UTF8_TO_TCHAR(Name) : TEXT("");
+			const int32 SourceIndex = Name ? Value.Names.IndexOfByPredicate([&FieldName](const FString& SourceName) { return SourceName.Equals(FieldName, ESearchCase::CaseSensitive); }) : INDEX_NONE;
 			if (SourceIndex == INDEX_NONE) return Fail(Error, TEXT("Composite struct is missing a compiled field."));
 			if (!ValidateUmka(Value.Children[SourceIndex], umkaGetFieldTypeByIndex(Type, Index), Error)) return false;
 		}
@@ -512,7 +517,8 @@ namespace
 		{
 			for (int32 Index = 0; Index < umkaGetFieldCount(Type); ++Index)
 			{
-				const int32 SourceIndex = Value.Names.IndexOfByKey(FString(UTF8_TO_TCHAR(umkaGetFieldNameByIndex(Type, Index))));
+				const FString FieldName = UTF8_TO_TCHAR(umkaGetFieldNameByIndex(Type, Index));
+				const int32 SourceIndex = Value.Names.IndexOfByPredicate([&FieldName](const FString& SourceName) { return SourceName.Equals(FieldName, ESearchCase::CaseSensitive); });
 				if (!ToUmka(VM, Value.Children[SourceIndex], umkaGetFieldTypeByIndex(Type, Index), static_cast<uint8*>(Data) + umkaGetFieldOffsetByIndex(Type, Index), Error)) return false;
 			}
 		}

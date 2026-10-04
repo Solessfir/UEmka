@@ -32,6 +32,7 @@ typedef struct tagUmka
 
     // main() context
     UmkaFuncContext mainFn;
+    bool isCompiled;
     
     // Arbitrary metadata
     void *metadata;
