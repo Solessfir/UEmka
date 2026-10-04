@@ -8,6 +8,11 @@ Bundled interpreter: [Umka 1.5.7](https://github.com/vtereshkov/umka-lang/releas
 
 Download `UEmka.zip` from the [releases](https://github.com/Solessfir/UEmka/releases) and extract it into your project's `Plugins` folder.
 
+## Supported platforms
+
+- Windows
+- Linux
+
 ## Quick start
 
 1. Add an **Umka Script** node to a Blueprint event graph.
