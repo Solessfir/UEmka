@@ -47,6 +47,38 @@ void SessionCancellationReady(UmkaStackSlot* Params, UmkaStackSlot* Result)
 	CancellationReady->Trigger();
 	umkaGetResult(Params, Result)->intVal = 1;
 }
+
+struct FResetFixture
+{
+	UObject* Caller = nullptr;
+	FGuid SessionId;
+	int32 Mode = 0;
+	bool bRequestReset = true;
+	bool bAccepted = false;
+	int32 ResetCount = 0;
+};
+
+FResetFixture* ActiveResetFixture = nullptr;
+
+void ResetActiveSession(UmkaStackSlot* Params, UmkaStackSlot* Result)
+{
+	FResetFixture& Fixture = *ActiveResetFixture;
+	if (Fixture.bRequestReset)
+	{
+		if (Fixture.Mode == 0) Fixture.bAccepted = UUEmkaFunctionLibrary::ResetRuntimeSession(Fixture.Caller, Fixture.SessionId);
+		else if (Fixture.Mode == 1)
+		{
+			Fixture.ResetCount = UUEmkaFunctionLibrary::ResetRuntimeSessionsForCaller(Fixture.Caller);
+			Fixture.bAccepted = Fixture.ResetCount > 0;
+		}
+		else
+		{
+			UUEmkaFunctionLibrary::ResetAllRuntimeSessions();
+			Fixture.bAccepted = true;
+		}
+	}
+	umkaGetResult(Params, Result)->intVal = 1;
+}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaSessionPersistenceTest, "UEmka.Runtime.Sessions.PersistenceIsolationAndReset", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -68,6 +100,18 @@ bool FUEmkaSessionPersistenceTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Missing session reset reports false"), UUEmkaFunctionLibrary::ResetRuntimeSession(First.Get(), Id));
 	Tick(*this, First.Get(), Id, Counter, 1);
 	Tick(*this, Second.Get(), Id, Counter, 2);
+	TestEqual(TEXT("Caller reset discards both of its nodes"), UUEmkaFunctionLibrary::ResetRuntimeSessionsForCaller(First.Get()), 2);
+	TestEqual(TEXT("Missing caller reset reports zero"), UUEmkaFunctionLibrary::ResetRuntimeSessionsForCaller(First.Get()), 0);
+	Tick(*this, First.Get(), Id, Counter, 1);
+	Tick(*this, First.Get(), OtherId, Counter, 1);
+	Tick(*this, Second.Get(), Id, Counter, 3);
+	FUEmkaExecutionOptions Reset = SessionOptions();
+	Reset.bResetSession = true;
+	Tick(*this, First.Get(), Id, Counter, 1, TEXT("Tick"), Reset);
+	Tick(*this, First.Get(), Id, Counter, 1, TEXT("Tick"), Reset);
+	Tick(*this, First.Get(), Id, Counter, 2);
+	Tick(*this, First.Get(), OtherId, Counter, 2);
+	Tick(*this, Second.Get(), Id, Counter, 4);
 	UUEmkaFunctionLibrary::ResetAllRuntimeSessions();
 	Tick(*this, First.Get(), Id, Counter, 1);
 	Tick(*this, Second.Get(), Id, Counter, 1);
@@ -262,6 +306,54 @@ bool FUEmkaSessionCancellationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Cancellation diagnostic is preserved"), Error.Contains(TEXT("Execution cancelled")));
 	TestEqual(TEXT("Cancellation clears result"), Result.IntValue, int64{0});
 	Tick(*this, Caller.Get(), Id, Counter, 1);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaSessionActiveResetTest, "UEmka.Runtime.Sessions.DeferredActiveReset", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaSessionActiveResetTest::RunTest(const FString& Parameters)
+{
+	FString Error;
+	const TArray<UEmkaHostFunctions::FFunction> Functions = {{TEXT("UEmkaResetActive"), &ResetActiveSession}};
+	if (!TestTrue(TEXT("Active reset callback registers"), UEmkaHostFunctions::RegisterModule(TEXT("tests/session-reset.um"), TEXT("fn UEmkaResetActive*(): int"), Functions, Error))) return false;
+	ON_SCOPE_EXIT
+	{
+		ActiveResetFixture = nullptr;
+		UUEmkaFunctionLibrary::ResetAllRuntimeSessions();
+		UEmkaHostFunctions::UnregisterModule(TEXT("tests/session-reset.um"), Error);
+	};
+	const FString Script = TEXT("import reset = \"tests/session-reset.um\"\nvar Count: int\n")
+		TEXT("fn Tick*(): int { Count++; reset::UEmkaResetActive(); n := 0; for n < 10000 { n++ }; return Count }");
+	FUEmkaExecutionOptions Options = SessionOptions();
+	Options.MaxInstructions = 1000000;
+	AddExpectedError(TEXT("] Tick:"), EAutomationExpectedErrorFlags::Contains, 3);
+	for (int32 Mode = 0; Mode < 3; ++Mode)
+	{
+		UUEmkaFunctionLibrary::ResetAllRuntimeSessions();
+		TStrongObjectPtr<UObject> First(NewObject<UUEmkaScriptAsset>());
+		TStrongObjectPtr<UObject> Second(NewObject<UUEmkaScriptAsset>());
+		FResetFixture Fixture;
+		Fixture.Caller = First.Get();
+		Fixture.SessionId = FGuid::NewGuid();
+		Fixture.Mode = Mode;
+		ActiveResetFixture = &Fixture;
+		const FGuid OtherId = FGuid::NewGuid();
+		Tick(*this, First.Get(), OtherId, Counter, 1);
+		Tick(*this, Second.Get(), Fixture.SessionId, Counter, 1);
+		FUEmkaScriptParam Result;
+		TestFalse(TEXT("Reset from an active native callback cancels after it returns"), UUEmkaFunctionLibrary::RunUmkaInlineConfigured(First.Get(), Script,
+			TEXT("Tick"), {}, EUEmkaValueType::Int, false, false, Result, Error, Fixture.SessionId, Options));
+		TestTrue(TEXT("Busy reset is accepted without destroying the active VM"), Fixture.bAccepted);
+		TestTrue(TEXT("Busy reset preserves cancellation diagnostic"), Error.Contains(TEXT("Execution cancelled")));
+		TestEqual(TEXT("Busy reset clears the failed result"), Result.IntValue, int64{0});
+		if (Mode == 1) TestEqual(TEXT("Caller reset includes both active and idle nodes"), Fixture.ResetCount, 2);
+		Fixture.bRequestReset = false;
+		Tick(*this, First.Get(), Fixture.SessionId, Script, 1, TEXT("Tick"), Options);
+		Tick(*this, First.Get(), Fixture.SessionId, Script, 2, TEXT("Tick"), Options);
+		Tick(*this, First.Get(), OtherId, Counter, Mode == 0 ? 2 : 1);
+		Tick(*this, Second.Get(), Fixture.SessionId, Counter, Mode == 2 ? 1 : 2);
+		ActiveResetFixture = nullptr;
+	}
 	return true;
 }
 

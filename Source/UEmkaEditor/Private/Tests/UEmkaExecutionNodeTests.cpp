@@ -12,11 +12,13 @@
 #include "HAL/FileManager.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_CallFunction.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "KismetCompiler.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "ScopedTransaction.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
@@ -92,6 +94,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaRuntimeStatusNodeTest, "UEmka.Editor.Exec
 
 bool FUEmkaRuntimeStatusNodeTest::RunTest(const FString& Parameters)
 {
+	AddExpectedError(TEXT("Test:"), EAutomationExpectedErrorFlags::Contains, 4);
 	for (const bool bAsset : {false, true})
 	{
 		for (const bool bMulti : {false, true})
@@ -115,7 +118,6 @@ bool FUEmkaRuntimeStatusNodeTest::RunTest(const FString& Parameters)
 				|| !TestNotNull(TEXT("Script return output"), Result)) return false;
 			Numerator->SetPropertyValue_InContainer(Args.GetStructMemory(), 14);
 			Denominator->SetPropertyValue_InContainer(Args.GetStructMemory(), 0);
-			AddExpectedError(TEXT("Test:"), EAutomationExpectedErrorFlags::Contains, 1);
 			Instance->ProcessEvent(Function, Args.GetStructMemory());
 			TestFalse(TEXT("Runtime failure reaches Then and exposes false"), Success->GetPropertyValue_InContainer(Args.GetStructMemory()));
 			TestTrue(TEXT("Runtime failure exposes diagnostic"), Error->GetPropertyValue_InContainer(Args.GetStructMemory()).Contains(TEXT("zero")));
@@ -142,6 +144,8 @@ bool FUEmkaExecutionOptionNodeTest::RunTest(const FString& Parameters)
 	const FExecutionGraph Graph = MakeExecutionGraph(TEXT("fn Test*(Value: int): int { return Value }"));
 	TestFalse(TEXT("Existing nodes remain stateless"), Graph.Node->ExecutionOptions.bUseSession);
 	TestEqual(TEXT("Existing nodes have no instruction limit"), Graph.Node->ExecutionOptions.MaxInstructions, int64(0));
+	TestEqual(TEXT("Existing nodes have no heap limit"), Graph.Node->ExecutionOptions.MaxHeapBytes, int64(0));
+	TestFalse(TEXT("Existing nodes do not request a session reset"), Graph.Node->ExecutionOptions.bResetSession);
 	TestFalse(TEXT("Runtime status defaults hidden"), Graph.Node->bExposeRuntimeStatus);
 	TestEqual(TEXT("Default signature retains four pins"), Graph.Node->Pins.Num(), 4);
 	TestNull(TEXT("Default signature has no Success output"), Graph.Node->FindPin(TEXT("Success"), EGPD_Output));
@@ -157,19 +161,25 @@ bool FUEmkaExecutionOptionNodeTest::RunTest(const FString& Parameters)
 		Graph.Node->RefreshScript();
 	}
 	TestNotNull(TEXT("Status option adds Success"), Graph.Node->FindPin(TEXT("Success"), EGPD_Output));
+	TestNotNull(TEXT("Session option adds Reset Session"), Graph.Node->FindPin(TEXT("ResetSession"), EGPD_Input));
 	TestTrue(TEXT("Status reconstruction preserves input connection"), Graph.Node->FindPin(TEXT("Value"), EGPD_Input)->LinkedTo.Contains(Source));
 	TestTrue(TEXT("Execution option edit undoes"), GEditor->UndoTransaction());
 	TestFalse(TEXT("Undo restores stateless option"), Graph.Node->ExecutionOptions.bUseSession);
 	TestEqual(TEXT("Undo restores unlimited budget"), Graph.Node->ExecutionOptions.MaxInstructions, int64(0));
 	TestNull(TEXT("Undo removes status output"), Graph.Node->FindPin(TEXT("Success"), EGPD_Output));
+	TestNull(TEXT("Undo removes session reset input"), Graph.Node->FindPin(TEXT("ResetSession"), EGPD_Input));
 	TestTrue(TEXT("Execution option edit redoes"), GEditor->RedoTransaction());
 	TestTrue(TEXT("Redo restores session option"), Graph.Node->ExecutionOptions.bUseSession);
 	TestEqual(TEXT("Redo restores budget"), Graph.Node->ExecutionOptions.MaxInstructions, int64(1234));
 	TestNotNull(TEXT("Redo restores status output"), Graph.Node->FindPin(TEXT("Success"), EGPD_Output));
+	TestNotNull(TEXT("Redo restores session reset input"), Graph.Node->FindPin(TEXT("ResetSession"), EGPD_Input));
 	TestTrue(TEXT("Redo retains input connection"), Graph.Node->FindPin(TEXT("Value"), EGPD_Input)->LinkedTo.Contains(Source));
 	Graph.Node->ExecutionOptions.MaxInstructions = 4321;
 	Graph.Node->RefreshScript();
 	TestTrue(TEXT("Budget edit preserves input connection"), Graph.Node->FindPin(TEXT("Value"), EGPD_Input)->LinkedTo.Contains(Source));
+	Graph.Node->FindPinChecked(TEXT("ResetSession"), EGPD_Input)->DefaultValue = TEXT("true");
+	Graph.Node->RefreshScript();
+	TestEqual(TEXT("Refresh preserves an explicit reset input default"), Graph.Node->FindPinChecked(TEXT("ResetSession"), EGPD_Input)->DefaultValue, FString(TEXT("true")));
 	return true;
 }
 
@@ -224,8 +234,10 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaSessionNodeTest, "UEmka.Editor.Execution.
 
 bool FUEmkaSessionNodeTest::RunTest(const FString& Parameters)
 {
+	ON_SCOPE_EXIT { UUEmkaFunctionLibrary::ResetAllRuntimeSessions(); };
 	const FExecutionGraph Graph = MakeExecutionGraph(TEXT("var Count: int\nfn Test*(): int { Count++; return Count }"), true);
 	Graph.Node->ExecutionOptions.bUseSession = true;
+	Graph.Node->RefreshScript();
 	if (!ConnectExecutionGraph(*this, Graph)) return false;
 	UFunction* Function = CompileExecutionGraph(*this, Graph);
 	if (!TestNotNull(TEXT("Session function exists"), Function)) return false;
@@ -240,6 +252,73 @@ bool FUEmkaSessionNodeTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Node GUID retains session across calls"), Result->GetPropertyValue_InContainer(Args.GetStructMemory()), int64(2));
 	Second->ProcessEvent(Function, Args.GetStructMemory());
 	TestEqual(TEXT("DefaultToSelf separates caller sessions"), Result->GetPropertyValue_InContainer(Args.GetStructMemory()), int64(1));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaSessionResetNodeTest, "UEmka.Editor.Execution.SessionReset",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaSessionResetNodeTest::RunTest(const FString& Parameters)
+{
+	ON_SCOPE_EXIT { UUEmkaFunctionLibrary::ResetAllRuntimeSessions(); };
+	for (const bool bAsset : {false, true})
+	{
+		for (const bool bMulti : {false, true})
+		{
+			const FString Script = bMulti
+				? TEXT("var Count: int\nfn Test*(ResetSession, RuntimeResetSession: bool): (int, str) { Count++; return Count, \"ok\" }")
+				: TEXT("var Count: int\nfn Test*(ResetSession, RuntimeResetSession: bool): int { Count++; return Count }");
+			const FExecutionGraph Graph = MakeExecutionGraph(Script, true, bAsset);
+			Graph.Node->ExecutionOptions.bUseSession = true;
+			Graph.Node->ExecutionOptions.MaxInstructions = 100000;
+			Graph.Node->ExecutionOptions.MaxHeapBytes = 32 * 1024 * 1024;
+			Graph.Node->RefreshScript();
+			if (!TestNotNull(TEXT("Reset input avoids both script argument names"), Graph.Node->FindPin(TEXT("RuntimeResetSession1"), EGPD_Input))
+				|| !ConnectExecutionGraph(*this, Graph)) return false;
+			UEdGraph* ResetGraph = FBlueprintEditorUtils::CreateNewGraph(Graph.Blueprint, TEXT("ResetTest"), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+			FBlueprintEditorUtils::AddFunctionGraph<UClass>(Graph.Blueprint, ResetGraph, true, nullptr);
+			TArray<UK2Node_FunctionEntry*> Entries;
+			ResetGraph->GetNodesOfClass(Entries);
+			UK2Node_FunctionResult* Exit = FBlueprintEditorUtils::FindOrCreateFunctionResultNode(Entries[0]);
+			UK2Node_CallFunction* ResetNode = NewObject<UK2Node_CallFunction>(ResetGraph);
+			ResetGraph->AddNode(ResetNode);
+			ResetNode->CreateNewGuid();
+			ResetNode->FunctionReference.SetExternalMember(GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, ResetRuntimeSessionsForCaller), UUEmkaFunctionLibrary::StaticClass());
+			ResetNode->AllocateDefaultPins();
+			const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+			if (!TestTrue(TEXT("Caller reset connects as a Blueprint node"), Schema->TryCreateConnection(Entries[0]->GetThenPin(), ResetNode->GetExecPin())
+				&& Schema->TryCreateConnection(ResetNode->GetThenPin(), Exit->GetExecPin()))) return false;
+			UFunction* Function = CompileExecutionGraph(*this, Graph);
+			UFunction* ResetFunction = Graph.Blueprint->GeneratedClass->FindFunctionByName(TEXT("ResetTest"));
+			if (!TestNotNull(TEXT("Reset session graph compiles"), Function) || !TestNotNull(TEXT("Caller reset graph compiles"), ResetFunction)) return false;
+			UObject* First = NewObject<UObject>(GetTransientPackage(), Graph.Blueprint->GeneratedClass);
+			UObject* Second = NewObject<UObject>(GetTransientPackage(), Graph.Blueprint->GeneratedClass);
+			FStructOnScope Args(Function);
+			FBoolProperty* Reset = FindFProperty<FBoolProperty>(Function, TEXT("RuntimeResetSession1"));
+			FInt64Property* Result = FindFProperty<FInt64Property>(Function, bMulti ? TEXT("OutReturnValue1") : TEXT("OutReturnValue"));
+			FBoolProperty* Success = FindFProperty<FBoolProperty>(Function, TEXT("OutSuccess"));
+			if (!TestNotNull(TEXT("Dynamic reset input compiles"), Reset) || !TestNotNull(TEXT("Reset result compiles"), Result)
+				|| !TestNotNull(TEXT("Reset status compiles"), Success)) return false;
+			const auto Call = [this, Function, &Args, Result, Success](UObject* Caller, const int64 Expected)
+			{
+				Caller->ProcessEvent(Function, Args.GetStructMemory());
+				TestTrue(TEXT("Compiled reset call succeeds"), Success->GetPropertyValue_InContainer(Args.GetStructMemory()));
+				TestEqual(TEXT("Compiled reset call has expected state"), Result->GetPropertyValue_InContainer(Args.GetStructMemory()), Expected);
+			};
+			Call(First, 1);
+			Call(First, 2);
+			Call(Second, 1);
+			Reset->SetPropertyValue_InContainer(Args.GetStructMemory(), true);
+			Call(First, 1);
+			Reset->SetPropertyValue_InContainer(Args.GetStructMemory(), false);
+			Call(First, 2);
+			Call(Second, 2);
+			FStructOnScope ResetArgs(ResetFunction);
+			First->ProcessEvent(ResetFunction, ResetArgs.GetStructMemory());
+			Call(First, 1);
+			Call(Second, 3);
+		}
+	}
 	return true;
 }
 
@@ -267,6 +346,52 @@ bool FUEmkaExecutionBudgetNodeTest::RunTest(const FString& Parameters)
 	AddExpectedError(TEXT("Max Instructions must be zero or greater"), EAutomationExpectedErrorFlags::Contains, 1);
 	Graph.Node->ValidateNodeDuringCompilation(Log);
 	TestTrue(TEXT("Negative instruction budget is a compile error"), Log.NumErrors > 0);
+	Graph.Node->ExecutionOptions.MaxInstructions = 0;
+	Graph.Node->ExecutionOptions.MaxHeapBytes = -1;
+	FCompilerResultsLog HeapLog;
+	AddExpectedError(TEXT("Max Heap Bytes must be zero or greater"), EAutomationExpectedErrorFlags::Contains, 1);
+	Graph.Node->ValidateNodeDuringCompilation(HeapLog);
+	TestTrue(TEXT("Negative heap budget is a compile error"), HeapLog.NumErrors > 0);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaExecutionHeapNodeTest, "UEmka.Editor.Execution.HeapLimit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaExecutionHeapNodeTest::RunTest(const FString& Parameters)
+{
+	ON_SCOPE_EXIT { UUEmkaFunctionLibrary::ResetAllRuntimeSessions(); };
+	AddExpectedError(TEXT("Heap budget exceeded"), EAutomationExpectedErrorFlags::Contains, 8);
+	for (const bool bSession : {false, true})
+	{
+		for (const bool bAsset : {false, true})
+		{
+			for (const bool bMulti : {false, true})
+			{
+				const FString Script = bMulti
+					? TEXT("fn Test*(): (int, str) { Values := make([]int, 1000000); return len(Values), \"ok\" }")
+					: TEXT("fn Test*(): int { Values := make([]int, 1000000); return len(Values) }");
+				const FExecutionGraph Graph = MakeExecutionGraph(Script, true, bAsset);
+				Graph.Node->ExecutionOptions.bUseSession = bSession;
+				Graph.Node->ExecutionOptions.MaxHeapBytes = 2 * 1024 * 1024;
+				Graph.Node->RefreshScript();
+				if (!ConnectExecutionGraph(*this, Graph)) return false;
+				UFunction* Function = CompileExecutionGraph(*this, Graph);
+				if (!TestNotNull(TEXT("Heap-limited function compiles"), Function)) return false;
+				UObject* Instance = NewObject<UObject>(GetTransientPackage(), Graph.Blueprint->GeneratedClass);
+				FStructOnScope Args(Function);
+				FBoolProperty* Success = FindFProperty<FBoolProperty>(Function, TEXT("OutSuccess"));
+				FStrProperty* Error = FindFProperty<FStrProperty>(Function, TEXT("OutError"));
+				FInt64Property* Result = FindFProperty<FInt64Property>(Function, bMulti ? TEXT("OutReturnValue1") : TEXT("OutReturnValue"));
+				if (!TestNotNull(TEXT("Heap Success output"), Success) || !TestNotNull(TEXT("Heap Error output"), Error)
+					|| !TestNotNull(TEXT("Heap value output"), Result)) return false;
+				Instance->ProcessEvent(Function, Args.GetStructMemory());
+				TestFalse(TEXT("Compiled heap cap rejects excess allocation"), Success->GetPropertyValue_InContainer(Args.GetStructMemory()));
+				TestTrue(TEXT("Heap exhaustion reaches Blueprint Error"), Error->GetPropertyValue_InContainer(Args.GetStructMemory()).Contains(TEXT("Heap budget exceeded")));
+				TestEqual(TEXT("Heap exhaustion clears return value"), Result->GetPropertyValue_InContainer(Args.GetStructMemory()), int64{0});
+			}
+		}
+	}
 	return true;
 }
 
@@ -280,6 +405,9 @@ bool FUEmkaExecutionPersistenceNodeTest::RunTest(const FString& Parameters)
 	const FExecutionGraph Graph = MakeExecutionGraph(TEXT("fn Test*(): int { return 7 }"), true, false, Package);
 	Graph.Node->ExecutionOptions.bUseSession = true;
 	Graph.Node->ExecutionOptions.MaxInstructions = 5678;
+	Graph.Node->ExecutionOptions.MaxHeapBytes = 1234567;
+	Graph.Node->ExecutionOptions.bResetSession = true;
+	Graph.Node->RefreshScript();
 	const FGuid Guid = Graph.Node->NodeGuid;
 	Graph.Blueprint->SetFlags(RF_Public | RF_Standalone);
 	const FName BlueprintName = Graph.Blueprint->GetFName();
@@ -306,6 +434,13 @@ bool FUEmkaExecutionPersistenceNodeTest::RunTest(const FString& Parameters)
 		{
 			TestTrue(TEXT("Session option persists"), Nodes[0]->ExecutionOptions.bUseSession);
 			TestEqual(TEXT("Instruction limit persists"), Nodes[0]->ExecutionOptions.MaxInstructions, int64(5678));
+			TestEqual(TEXT("Heap limit persists"), Nodes[0]->ExecutionOptions.MaxHeapBytes, int64(1234567));
+			TestTrue(TEXT("Reset default persists"), Nodes[0]->ExecutionOptions.bResetSession);
+			if (UEdGraphPin* ResetPin = Nodes[0]->FindPin(TEXT("ResetSession"), EGPD_Input))
+			{
+				TestEqual(TEXT("Reset input default persists"), ResetPin->DefaultValue, FString(TEXT("true")));
+			}
+			else AddError(TEXT("Reset input did not persist"));
 			TestTrue(TEXT("Status option persists"), Nodes[0]->bExposeRuntimeStatus);
 			TestEqual(TEXT("Session identity persists"), Nodes[0]->NodeGuid, Guid);
 			TestNotNull(TEXT("Status pin persists"), Nodes[0]->FindPin(TEXT("Success"), EGPD_Output));

@@ -188,6 +188,7 @@ typedef const char *(*UmkaGetTypeNameInMainModule)(Umka *umka, const UmkaType *t
 typedef void (*UmkaSetExecutionBudget)          (Umka *umka, uint64_t maxInstructions, UmkaCancelCallback callback, void *userData);
 typedef const char *(*UmkaGetTypeModulePath)    (Umka *umka, const UmkaType *type);
 typedef bool (*UmkaTypeSameDeclaration)        (Umka *umka, const UmkaType *type, const char *modulePath, const char *typeName);
+typedef bool (*UmkaSetHeapBudget)              (Umka *umka, int64_t maxHeapBytes);
 
 
 typedef struct
@@ -257,6 +258,7 @@ typedef struct
     UmkaSetExecutionBudget umkaSetExecutionBudget;
     UmkaGetTypeModulePath umkaGetTypeModulePath;
     UmkaTypeSameDeclaration umkaTypeSameDeclaration;
+    UmkaSetHeapBudget   umkaSetHeapBudget;
 } UmkaAPI;
 
 
@@ -266,6 +268,8 @@ UMKA_API bool umkaCompile                   (Umka *umka);
 UMKA_API int  umkaRun                       (Umka *umka);
 UMKA_API int  umkaCall                      (Umka *umka, UmkaFuncContext *fn);
 UMKA_API void umkaSetExecutionBudget        (Umka *umka, uint64_t maxInstructions, UmkaCancelCallback callback, void *userData);
+// Set after initialization, before compilation or native marshaling. Zero disables the limit.
+UMKA_API bool umkaSetHeapBudget             (Umka *umka, int64_t maxHeapBytes);
 UMKA_API const char *umkaGetTypeModulePath  (Umka *umka, const UmkaType *type);
 UMKA_API bool umkaTypeSameDeclaration       (Umka *umka, const UmkaType *type, const char *modulePath, const char *typeName);
 UMKA_API void umkaFree                      (Umka *umka);

@@ -8,6 +8,7 @@
 #include "HAL/FileManager.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_CallFunction.h"
 #include "K2Node_UEmka.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -199,8 +200,12 @@ int32 UUEmkaCookFixtureCommandlet::Main(const FString& Params)
 		TEXT("fn RoundTrip*(V: u::Vector = u::Vector{1.25, -2.5, 3.75}, T: u::Transform = u::Transform{u::Quat{0, 0, 0, 1}, u::Vector{0, 0, 0}, u::Vector{1, 1, 1}}): (u::Vector, u::Transform) { return V, T }");
 	FUEmkaExecutionOptions SessionOptions;
 	SessionOptions.bUseSession = true;
+	SessionOptions.MaxHeapBytes = 2 * 1024 * 1024;
 	FUEmkaExecutionOptions BudgetOptions;
 	BudgetOptions.MaxInstructions = 100;
+	FUEmkaExecutionOptions HeapOptions;
+	HeapOptions.MaxHeapBytes = 2 * 1024 * 1024;
+	const FString HeapScript = TEXT("fn Allocate*(Count: int): int { Values := make([]int, Count); return len(Values) }");
 	const TArray<UEmkaHostFunctions::FFunction> HostFunctions = {{TEXT("UEmkaCookHostDouble"), &CookHostDouble}};
 	if (!UEmkaHostFunctions::RegisterModule(TEXT("cook/host.um"), TEXT("fn UEmkaCookHostDouble*(Value: int): int"), HostFunctions, Error))
 	{
@@ -213,7 +218,22 @@ int32 UUEmkaCookFixtureCommandlet::Main(const FString& Params)
 		|| !AddValidationFunction(Blueprint, TEXT("ExecuteCookedSession"), TEXT("var Count: int\nfn CountCalls*(): int { Count++; return Count }"), SessionOptions, true)
 		|| !AddValidationFunction(Blueprint, TEXT("ExecuteCookedStatus"), TEXT("fn Divide*(Value: int): int { return 7 / Value }"), {}, true)
 		|| !AddValidationFunction(Blueprint, TEXT("ExecuteCookedBudget"), TEXT("fn Budget*(): int { n := 0; for n < 2000 { n++ }; return n }"), BudgetOptions, true)
+		|| !AddValidationFunction(Blueprint, TEXT("ExecuteCookedHeap"), HeapScript, HeapOptions, true)
+		|| !AddValidationFunction(Blueprint, TEXT("ExecuteCookedSessionHeap"), HeapScript, SessionOptions, true)
 		|| !AddValidationFunction(Blueprint, TEXT("ExecuteCookedHost"), TEXT("import \"cook/host.um\"\nfn Host*(): int { return host::UEmkaCookHostDouble(21) }"), {}, true)) return 1;
+	UEdGraph* ResetGraph = FBlueprintEditorUtils::CreateNewGraph(Blueprint, TEXT("ResetCookedCaller"), UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+	FBlueprintEditorUtils::AddFunctionGraph<UClass>(Blueprint, ResetGraph, true, nullptr);
+	TArray<UK2Node_FunctionEntry*> ResetEntries;
+	ResetGraph->GetNodesOfClass(ResetEntries);
+	if (ResetEntries.Num() != 1) return 1;
+	UK2Node_FunctionResult* ResetExit = FBlueprintEditorUtils::FindOrCreateFunctionResultNode(ResetEntries[0]);
+	UK2Node_CallFunction* ResetNode = NewObject<UK2Node_CallFunction>(ResetGraph);
+	ResetGraph->AddNode(ResetNode);
+	ResetNode->CreateNewGuid();
+	ResetNode->FunctionReference.SetExternalMember(GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, ResetRuntimeSessionsForCaller), UUEmkaFunctionLibrary::StaticClass());
+	ResetNode->AllocateDefaultPins();
+	if (!ConnectFixturePins(Schema, ResetEntries[0]->GetThenPin(), ResetNode->GetExecPin(), TEXT("ResetCookedCaller"))
+		|| !ConnectFixturePins(Schema, ResetNode->GetThenPin(), ResetExit ? ResetExit->GetExecPin() : nullptr, TEXT("ResetCookedCaller"))) return 1;
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 	FCompilerResultsLog Log;
 	FKismetEditorUtilities::CompileBlueprint(Blueprint, EBlueprintCompileOptions::SkipGarbageCollection, &Log);

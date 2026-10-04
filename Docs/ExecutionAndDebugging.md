@@ -37,7 +37,17 @@ fn count*(): int {
 
 With the default fresh execution, each call returns `1`. With **Use Session** enabled, repeated calls on the same node and Blueprint instance return `1`, `2`, `3`, and so on.
 
-Use `ResetRuntimeSession(Caller, SessionId)` to discard an idle session, or `ResetAllRuntimeSessions()` to discard idle sessions and cancel active calls. Dead owners are cleaned after garbage collection; world cleanup and engine shutdown reset sessions. Session VMs cannot execute concurrently or reenter the same session.
+Enabling **Use Session** adds a **Reset Session** Boolean input. Set it to `true` to discard this node's state for the current caller before that execution. Keep it `false` to preserve state. The input remains independent of script parameters with the same name.
+
+The Blueprint **Reset Runtime Sessions For Caller** node resets all sessions belonging to its `Caller`, which defaults to the current Blueprint instance. It returns the number of sessions reset. **Reset All Runtime Sessions** resets sessions for every caller. The C++ `ResetRuntimeSession(Caller, SessionId)` API resets one node and returns whether it found a session.
+
+Resetting an active session requests cancellation and destroys its VM only after the call unwinds. A reset requested from a native callback takes effect after the callback returns; reentry remains rejected while the old call is active. Dead owners are cleaned after garbage collection; world cleanup and engine shutdown reset sessions. Session VMs cannot execute concurrently or reenter the same session.
+
+## VM heap limits
+
+**Execution Options > Max Heap Bytes** caps the VM's reserved heap memory, including heap page headers, retained recycled pages, and fiber stacks. Zero keeps the heap unlimited. The budget applies before compilation, while parameters are marshaled, and during script execution. A retained session keeps its heap between calls, so lowering its budget below its current reservation fails that call.
+
+This limit excludes the compiler's general storage and Unreal-side parameter and result containers. The VM needs memory for its initial stack even when a script allocates nothing, so allow room for that baseline. Exceeding the cap reports `Heap budget exceeded`, clears output values, and rebuilds a failed session on its next call.
 
 ## Script logging
 

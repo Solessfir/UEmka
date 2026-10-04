@@ -81,6 +81,13 @@ struct FUEmkaExecutionOptions
 	// Zero leaves execution unlimited. Each call starts a new instruction budget.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution", Meta = (ClampMin = "0", UIMin = "0"))
 	int64 MaxInstructions = 0;
+
+	// Caps reserved VM heap bytes, including fiber stacks. Zero leaves the heap unlimited.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution", Meta = (ClampMin = "0", UIMin = "0"))
+	int64 MaxHeapBytes = 0;
+
+	UPROPERTY(BlueprintReadWrite, Category = "UEmka|Execution")
+	bool bResetSession = false;
 };
 
 // Ordered, typed parameter for RunUmkaInline. One element per Umka function parameter.
@@ -156,8 +163,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UEmka|Execution", Meta = (DefaultToSelf = "Caller"))
 	static bool ResetRuntimeSession(UObject* Caller, const FGuid& SessionId);
 
+	UFUNCTION(BlueprintCallable, Category = "UEmka|Execution", Meta = (DefaultToSelf = "Caller"))
+	static int32 ResetRuntimeSessionsForCaller(UObject* Caller);
+
 	// May be requested from another thread; the VM observes it at dispatch boundaries.
 	static bool CancelExecution(UObject* Caller, const FGuid& SessionId);
+	UFUNCTION(BlueprintCallable, Category = "UEmka|Execution")
 	static void ResetAllRuntimeSessions();
 	static void CleanupInvalidRuntimeSessions();
 

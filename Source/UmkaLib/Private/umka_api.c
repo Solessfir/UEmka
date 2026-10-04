@@ -164,6 +164,29 @@ UMKA_API void umkaSetExecutionBudget(Umka *umka, uint64_t maxInstructions, UmkaC
 }
 
 
+UMKA_API bool umkaSetHeapBudget(Umka *umka, int64_t maxHeapBytes)
+{
+    if (!umka || !umkaAlive(umka))
+        return false;
+
+    const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0 && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->vm.callNesting = 0;
+        return false;
+    }
+    umka->error.jumperNesting++;
+    if (maxHeapBytes < 0)
+        runtimeError(umka, ERR_RUNTIME, "Illegal heap budget");
+    if (maxHeapBytes > 0 && umka->vm.pages.allocatedSize > maxHeapBytes)
+        runtimeError(umka, ERR_RUNTIME, "Heap budget exceeded");
+    umka->vm.pages.maxHeapBytes = maxHeapBytes;
+    umka->error.jumperNesting = previousNesting;
+    return true;
+}
+
+
 UMKA_API void umkaFree(Umka *umka)
 {
     compilerFree(umka);
@@ -260,7 +283,19 @@ UMKA_API void umkaSetHook(Umka *umka, UmkaHookEvent event, UmkaHookFunc hook)
 
 UMKA_API void *umkaAllocData(Umka *umka, int size, UmkaExternFunc onFree)
 {
-    return vmAllocData(&umka->vm, size, onFree);
+    if (!umka || !umkaAlive(umka))
+        return NULL;
+    const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0 && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->vm.callNesting = 0;
+        return NULL;
+    }
+    umka->error.jumperNesting++;
+    void *data = vmAllocData(&umka->vm, size, onFree);
+    umka->error.jumperNesting = previousNesting;
+    return data;
 }
 
 
@@ -285,7 +320,19 @@ UMKA_API void *umkaGetMapItem(Umka *umka, UmkaMap *map, UmkaStackSlot key)
 
 UMKA_API char *umkaMakeStr(Umka *umka, const char *str)
 {
-    return vmMakeStr(&umka->vm, str);
+    if (!umka || !str || !umkaAlive(umka))
+        return NULL;
+    const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0 && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->vm.callNesting = 0;
+        return NULL;
+    }
+    umka->error.jumperNesting++;
+    char *data = vmMakeStr(&umka->vm, str);
+    umka->error.jumperNesting = previousNesting;
+    return data;
 }
 
 
@@ -299,7 +346,18 @@ UMKA_API int umkaGetStrLen(const char *str)
 
 UMKA_API void umkaMakeDynArray(Umka *umka, void *array, const UmkaType *type, int len)
 {
+    if (!umka || !array || !type || type->kind != TYPE_DYNARRAY || !umkaAlive(umka))
+        return;
+    const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0 && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->vm.callNesting = 0;
+        return;
+    }
+    umka->error.jumperNesting++;
     vmMakeDynArray(&umka->vm, (DynArray *)array, type, len);
+    umka->error.jumperNesting = previousNesting;
 }
 
 
@@ -374,7 +432,19 @@ UMKA_API void umkaSetMetadata(Umka *umka, void *metadata)
 
 UMKA_API void *umkaMakeStruct(Umka *umka, const UmkaType *type)
 {
-    return vmMakeStruct(&umka->vm, type);
+    if (!umka || !type || !umkaAlive(umka))
+        return NULL;
+    const int previousNesting = umka->error.jumperNesting;
+    if (previousNesting == 0 && setjmp(umka->error.jumper) != 0)
+    {
+        umka->error.jumperNesting = 0;
+        umka->vm.callNesting = 0;
+        return NULL;
+    }
+    umka->error.jumperNesting++;
+    void *data = vmMakeStruct(&umka->vm, type);
+    umka->error.jumperNesting = previousNesting;
+    return data;
 }
 
 

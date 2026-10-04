@@ -247,12 +247,13 @@ static int32 GetArrayValueNum(const FUEmkaScriptParam& Param)
 	}
 }
 
-static void WriteArrayElements(Umka* Umka, void* Data, const int32 Len, const int32 ItemSize, const FUEmkaScriptParam& Param)
+static bool WriteArrayElements(Umka* Umka, void* Data, const int32 Len, const int32 ItemSize, const FUEmkaScriptParam& Param)
 {
 	if (Len <= 0)
 	{
-		return;
+		return true;
 	}
+	if (!Data) return false;
 
 	switch (Param.Type)
 	{
@@ -268,6 +269,7 @@ static void WriteArrayElements(Umka* Umka, void* Data, const int32 Len, const in
 			for (int32 i = 0; i < Len; ++i)
 			{
 				DataPtr[i] = umkaMakeStr(Umka, TCHAR_TO_UTF8(*Param.StringArrayValue[i]));
+				if (!DataPtr[i]) return false;
 			}
 			break;
 		}
@@ -278,6 +280,7 @@ static void WriteArrayElements(Umka* Umka, void* Data, const int32 Len, const in
 			}
 			break;
 	}
+	return true;
 }
 
 // Copies contiguous Umka array elements into the matching Blueprint-facing storage.
@@ -494,7 +497,11 @@ static bool PushUmkaParams(Umka* Umka, const UmkaFuncContext& Context, const int
 				return false;
 			}
 			FMemory::Memzero(Slot, umkaGetTypeSize(ParamType));
-			if (!UEmkaComposite::WriteUmka(Umka, ParamType, Param.CompositeValue, Slot, Error)) return false;
+			if (!UEmkaComposite::WriteUmka(Umka, ParamType, Param.CompositeValue, Slot, Error))
+			{
+				if (!umkaAlive(Umka)) Error = FormatRuntimeError(Umka);
+				return false;
+			}
 			continue;
 		}
 		const UmkaType* ValueType = Param.bIsArray && ParamType ? umkaGetBaseType(ParamType) : ParamType;
@@ -550,7 +557,11 @@ static bool PushUmkaParams(Umka* Umka, const UmkaFuncContext& Context, const int
 				if (ArraySize > 0)
 				{
 					FMemory::Memzero(Slot, ArraySize);
-					WriteArrayElements(Umka, Slot, ActualLen, ItemSize, Param);
+					if (!WriteArrayElements(Umka, Slot, ActualLen, ItemSize, Param))
+					{
+						Error = FormatRuntimeError(Umka);
+						return false;
+					}
 				}
 			}
 			else
@@ -558,10 +569,14 @@ static bool PushUmkaParams(Umka* Umka, const UmkaFuncContext& Context, const int
 				// []T is a three-slot header. Umka allocates backing storage from the VM heap.
 				FUmkaDynArrayHeader& Header = ArrayHeaders.AddZeroed_GetRef();
 				umkaMakeDynArray(Umka, &Header, ParamType, ActualLen);
-				WriteArrayElements(Umka, Header.data, ActualLen, static_cast<int32>(Header.itemSize), Param);
 				Slot[0].ptrVal = const_cast<UmkaType*>(Header.type);
 				Slot[1].intVal = Header.itemSize;
 				Slot[2].ptrVal = Header.data;
+				if (!umkaAlive(Umka) || !WriteArrayElements(Umka, Header.data, ActualLen, static_cast<int32>(Header.itemSize), Param))
+				{
+					Error = FormatRuntimeError(Umka);
+					return false;
+				}
 			}
 			continue;
 		}
@@ -590,6 +605,11 @@ static bool PushUmkaParams(Umka* Umka, const UmkaFuncContext& Context, const int
 				break;
 			case EUEmkaValueType::Str:
 				Slot->ptrVal = umkaMakeStr(Umka, TCHAR_TO_UTF8(*Param.StringValue));
+				if (!Slot->ptrVal)
+				{
+					Error = FormatRuntimeError(Umka);
+					return false;
+				}
 				break;
 			default:
 				break;
@@ -773,8 +793,9 @@ struct FUmkaScopedVM
 	FString Error;
 	int32 ErrorLine = -1;
 	UEmkaHostFunctions::FSnapshot HostSnapshot;
+	UEmkaHostFunctions::FObjectHandles ObjectHandles;
 
-	FUmkaScopedVM(const FString& Script, const FString& FunctionName, const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true, const bool bResolveFunction = true)
+	FUmkaScopedVM(const FString& Script, const FString& FunctionName, const TArray<FUEmkaModuleSource>& Modules = {}, const FString& FileName = TEXT("script.um"), const bool bAllowFileImports = true, const bool bResolveFunction = true, const int64 MaxHeapBytes = 0)
 	{
 		UEmkaHostFunctions::AcquireSnapshot(HostSnapshot);
 		if (bResolveFunction && FunctionName.IsEmpty())
@@ -799,6 +820,11 @@ struct FUmkaScopedVM
 		if (!umkaInit(VM, TCHAR_TO_UTF8(*FileName), TCHAR_TO_UTF8(*Script), UmkaStackSize, nullptr, 0, nullptr, false, false, nullptr))
 		{
 			Error = FormatUmkaError(VM, TEXT("Umka failed to initialize"));
+			return;
+		}
+		if (!umkaSetHeapBudget(VM, MaxHeapBytes))
+		{
+			Error = FormatUmkaError(VM, TEXT("Could not configure the Umka heap budget"));
 			return;
 		}
 		umkaSetFileImportsEnabled(VM, bAllowFileImports);
@@ -855,6 +881,7 @@ struct FUmkaScopedVM
 	{
 		if (VM)
 		{
+			UEmkaHostFunctions::FScopedCallContext CleanupContext(nullptr, {});
 			umkaFree(VM);
 		}
 		UEmkaHostFunctions::ReleaseSnapshot();
@@ -972,12 +999,18 @@ struct FUmkaExecution
 	bool bTracked = false;
 	bool bRetain = false;
 	FString Error;
+	TUniquePtr<UEmkaHostFunctions::FScopedCallContext> HostContext;
 
 	FUmkaExecution(UObject* Caller, const FGuid& Id, const FUEmkaExecutionOptions& Options, const FString& Script, const FString& FunctionName, const TArray<FUEmkaModuleSource>& Modules, const FString& FileName, bool bAllowFileImports)
 	{
 		if (Options.MaxInstructions < 0)
 		{
 			Error = TEXT("Instruction budget cannot be negative");
+			return;
+		}
+		if (Options.MaxHeapBytes < 0)
+		{
+			Error = TEXT("Heap budget cannot be negative");
 			return;
 		}
 		bRetain = Options.bUseSession;
@@ -987,6 +1020,7 @@ struct FUmkaExecution
 			Error = TEXT("Runtime sessions require a caller and a valid session ID");
 			return;
 		}
+		if (bRetain && Options.bResetSession) UUEmkaFunctionLibrary::ResetRuntimeSession(Caller, Id);
 		// Cached VMs only import source supplied by assets, builtin modules, or the host registry.
 		bAllowFileImports &= !bRetain;
 		TArray<TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> Removed;
@@ -1023,7 +1057,7 @@ struct FUmkaExecution
 		if (!bRetain || !Session->Matches(Script, FunctionName, FileName, Modules, bAllowFileImports))
 		{
 			Session->Vm.Reset();
-			Session->Vm = MakeUnique<FUmkaScopedVM>(Script, FunctionName, Modules, FileName, bAllowFileImports);
+			Session->Vm = MakeUnique<FUmkaScopedVM>(Script, FunctionName, Modules, FileName, bAllowFileImports, true, Options.MaxHeapBytes);
 			Session->Script = Script;
 			Session->FunctionName = FunctionName;
 			Session->FileName = FileName;
@@ -1035,8 +1069,14 @@ struct FUmkaExecution
 			Error = Session->Vm->Error;
 			return;
 		}
+		if (!umkaSetHeapBudget(Session->Vm->VM, Options.MaxHeapBytes))
+		{
+			Error = FormatUmkaError(Session->Vm->VM, TEXT("Could not configure the Umka heap budget"));
+			return;
+		}
 		const UmkaCancelCallback Callback = bTracked ? +[](void* Data) { return static_cast<FUmkaSession*>(Data)->bCancelled.Load(); } : nullptr;
 		umkaSetExecutionBudget(Session->Vm->VM, static_cast<uint64>(Options.MaxInstructions), Callback, Session.Get());
+		HostContext = MakeUnique<UEmkaHostFunctions::FScopedCallContext>(Caller, Id, &Session->Vm->ObjectHandles);
 	}
 
 	~FUmkaExecution()
@@ -1064,10 +1104,43 @@ bool UUEmkaFunctionLibrary::ResetRuntimeSession(UObject* Caller, const FGuid& Se
 		FScopeLock Lock(&GUmkaSessionMutex);
 		const FUmkaSessionKey Key{FObjectKey(Caller), SessionId};
 		Removed = GUmkaSessions.FindRef(Key);
-		if (!Removed || Removed->bBusy) return false;
+		if (!Removed) return false;
+		if (Removed->bBusy)
+		{
+			Removed->bResetRequested = true;
+			Removed->bCancelled.Store(true);
+			return true;
+		}
 		GUmkaSessions.Remove(Key);
 	}
 	return true;
+}
+
+int32 UUEmkaFunctionLibrary::ResetRuntimeSessionsForCaller(UObject* Caller)
+{
+	if (!Caller) return 0;
+	const FObjectKey Owner(Caller);
+	TArray<TSharedPtr<FUmkaSession, ESPMode::ThreadSafe>> Removed;
+	int32 Count = 0;
+	{
+		FScopeLock Lock(&GUmkaSessionMutex);
+		for (auto It = GUmkaSessions.CreateIterator(); It; ++It)
+		{
+			if (It.Key().Caller != Owner) continue;
+			++Count;
+			if (It.Value()->bBusy)
+			{
+				It.Value()->bResetRequested = true;
+				It.Value()->bCancelled.Store(true);
+			}
+			else
+			{
+				Removed.Add(It.Value());
+				It.RemoveCurrent();
+			}
+		}
+	}
+	return Count;
 }
 
 bool UUEmkaFunctionLibrary::CancelExecution(UObject* Caller, const FGuid& SessionId)
@@ -1134,7 +1207,7 @@ static bool RunUmkaScript(UObject* Caller, const FString& Script, const FString&
 	const bool bCompiledStaticArray = umkaIsStaticArrayType(CompiledResultType);
 	const bool bCompiledDynArray = umkaIsDynArrayType(CompiledResultType);
 	const UmkaType* ResultValueType = bCompiledStaticArray || bCompiledDynArray ? umkaGetBaseType(CompiledResultType) : CompiledResultType;
-	EUEmkaValueType ActualResultType;
+	EUEmkaValueType ActualResultType = EUEmkaValueType::Void;
 	const bool bCompositeResult = ResultType == EUEmkaValueType::Composite;
 	if (bResultIsArray != (bCompiledStaticArray || bCompiledDynArray)
 		|| bResultIsStaticArray != bCompiledStaticArray

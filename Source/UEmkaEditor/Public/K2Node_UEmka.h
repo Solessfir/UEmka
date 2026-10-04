@@ -192,6 +192,7 @@ public:
 
 private:
 	FName GetRuntimeStatusPinName(FName Name) const;
+	FName GetResetSessionPinName() const;
 	bool ResolveCurrentSource(FString& OutSource, FString& OutFileName, TArray<FUEmkaModuleSource>& OutModules, FString& OutError) const;
 	FUEmkaSignature ParseCurrentScript() const;
 	static TOptional<EUEmkaValueType> ParseUmkaType(const FString& TypeName);

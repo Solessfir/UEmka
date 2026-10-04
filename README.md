@@ -35,8 +35,8 @@ The `*` makes the function callable from Blueprint. This example creates an Inte
 | [Structs and maps](Docs/StructsAndMaps.md) | Flattened fields, native struct pins, and map values |
 | [Unreal types](Docs/UnrealTypes.md) | Vector, Rotator, LinearColor, Quat, and Transform |
 | [Reusable modules](Docs/Modules.md) | Script assets, imports, and function selection |
-| [Execution and debugging](Docs/ExecutionAndDebugging.md) | Error outputs, logging, budgets, cancellation, and sessions |
-| [C++ host functions](Docs/HostFunctions.md) | Registering native callbacks and module declarations |
+| [Execution and debugging](Docs/ExecutionAndDebugging.md) | Error outputs, logging, instruction and heap budgets, cancellation, and session resets |
+| [C++ host functions](Docs/HostFunctions.md) | Native callbacks, caller/world context, and safe UObject handles |
 | [Limitations](Docs/Limitations.md) | Supported pin shapes and value limits |
 | [Testing](Docs/Testing.md) | Editor automation and cooked validation |
 

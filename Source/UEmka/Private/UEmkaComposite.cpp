@@ -528,6 +528,7 @@ namespace
 				FDynArray Header{};
 				umkaMakeDynArray(VM, &Header, Type, Value.Children.Num());
 				Store(Data, Header);
+				if (!umkaAlive(VM)) return Fail(Error, TEXT("Could not allocate a native composite array."));
 				Items = Header.Data;
 				if (Value.Children.Num() && !Items) return Fail(Error, TEXT("Could not allocate a native composite array."));
 			}
@@ -539,6 +540,7 @@ namespace
 			UmkaMap Map{};
 			umkaMakeMap(VM, &Map, Type);
 			Store(Data, Map);
+			if (!umkaAlive(VM)) return Fail(Error, TEXT("Could not allocate a native composite map."));
 			const UmkaType* KeyType = umkaGetMapKeyType(Type);
 			for (int32 Index = 0; Index < Value.Children.Num(); Index += 2)
 			{
@@ -547,6 +549,7 @@ namespace
 				{
 					FTCHARToUTF8 UTF8(*Value.Children[Index].String);
 					Key.ptrVal = umkaMakeStr(VM, UTF8.Get());
+					if (!Key.ptrVal) return Fail(Error, TEXT("Could not allocate a native composite map key."));
 				}
 				else Key.uintVal = Value.Children[Index].Integer;
 				void* Item = umkaEnsureMapItem(VM, &Map, Key);

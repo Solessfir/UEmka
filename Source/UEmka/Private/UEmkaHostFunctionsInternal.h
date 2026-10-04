@@ -7,6 +7,25 @@
 
 namespace UEmkaHostFunctions
 {
+// A retained VM owns its handles. Replacing or destroying the VM invalidates every token.
+struct FObjectHandles
+{
+	TMap<FObjectHandle, TWeakObjectPtr<UObject>> Objects;
+};
+
+class FScopedCallContext
+{
+public:
+	FScopedCallContext(UObject* Caller, const FGuid& SessionId, FObjectHandles* Handles = nullptr);
+	~FScopedCallContext();
+	FScopedCallContext(const FScopedCallContext&) = delete;
+	FScopedCallContext& operator=(const FScopedCallContext&) = delete;
+
+private:
+	FCallContext Context;
+	const FCallContext* Previous = nullptr;
+};
+
 struct FSnapshot
 {
 	TArray<FUEmkaModuleSource> Modules;

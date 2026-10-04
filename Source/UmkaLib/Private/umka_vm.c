@@ -394,6 +394,7 @@ static void pageInit(HeapPages *pages, Fiber *fiber, Storage *storage, Error *er
     pages->lowest = pages->highest = NULL;
     pages->freeId = 1;
     pages->totalSize = pages->blacklistedSize = 0;
+    pages->allocatedSize = pages->maxHeapBytes = 0;
     pages->fiber = fiber;
     pages->leakSanLevel = 1;
     candidateInit(&pages->refCntCandidates, storage);
@@ -458,10 +459,11 @@ static FORCE_INLINE HeapPage *pageFindRecycled(HeapPages *pages, int size)
         HeapPage *page = pages->firstRecycled;
         pages->firstRecycled = pages->firstRecycled->next;
         
-        const int recycledSize = page->numChunks * page->chunkSize;
+        const int64_t recycledSize = page->allocationSize - sizeof(HeapPage);
         if (recycledSize >= size)
             return page;
 
+        pages->allocatedSize -= page->allocationSize;
         free(page);
 
         pages->totalSize -= recycledSize;
@@ -550,16 +552,25 @@ static FORCE_INLINE void pageMoveToBlacklisted(HeapPages *pages, HeapPage *page)
 
 static FORCE_INLINE HeapPage *pageAdd(HeapPages *pages, int numChunks, int chunkSize)
 {
-    const int size = numChunks * chunkSize;
+    const int64_t size = (int64_t)numChunks * chunkSize;
+    if (UNLIKELY(numChunks <= 0 || chunkSize <= 0 || size > INT_MAX || (uint64_t)size > SIZE_MAX - sizeof(HeapPage)))
+        pages->error->runtimeHandler(pages->error->context, ERR_RUNTIME, "Illegal heap page size");
     
     // Try finding a recycled page
     HeapPage *page = pageFindRecycled(pages, size);
     if (!page)
     {
-        page = malloc(sizeof(HeapPage) + size);
+        const int64_t allocationSize = sizeof(HeapPage) + size;
+        if (UNLIKELY(pages->allocatedSize > INT64_MAX - allocationSize))
+            pages->error->runtimeHandler(pages->error->context, ERR_RUNTIME, "Out of memory");
+        if (UNLIKELY(pages->maxHeapBytes > 0 && allocationSize > pages->maxHeapBytes - pages->allocatedSize))
+            pages->error->runtimeHandler(pages->error->context, ERR_RUNTIME, "Heap budget exceeded");
+        page = malloc((size_t)allocationSize);
         if (UNLIKELY(!page))
             pages->error->runtimeHandler(pages->error->context, ERR_RUNTIME, "Out of memory");
 
+        page->allocationSize = allocationSize;
+        pages->allocatedSize += allocationSize;
         pages->totalSize += size;
     }
 
@@ -704,6 +715,9 @@ static FORCE_INLINE HeapPage *pageFindById(HeapPages *pages, int id)
 
 static FORCE_INLINE void *chunkAlloc(HeapPages *pages, int64_t size, const Type *type, UmkaExternFunc onFree, bool isStack, Error *error)
 {
+    if (UNLIKELY(size < 0 || size > INT_MAX))
+        error->runtimeHandler(error->context, ERR_RUNTIME, "Cannot allocate a block of %lld bytes", size);
+
     // Page layout: header, data, footer (char), padding, header, data, footer (char), padding...
     const int64_t chunkSize = align(sizeof(HeapChunk) + align(size + 1, sizeof(int64_t)), MEM_MIN_HEAP_CHUNK);
 
@@ -1406,6 +1420,9 @@ static void doRefCntImpl(HeapPages *pages, void *ptr, const Type *type, TokenKin
 
 static FORCE_INLINE char *doAllocStr(HeapPages *pages, int64_t len, Error *error)
 {
+    if (UNLIKELY(len < 0 || len >= INT_MAX))
+        error->runtimeHandler(error->context, ERR_RUNTIME, "Illegal string length");
+
     StrDimensions dims = {.len = len, .capacity = 2 * (len + 1)};
 
     if (dims.capacity > INT_MAX - MEM_MIN_FREE_HEAP)
@@ -4426,6 +4443,7 @@ void vmMakeDynArray(VM *vm, DynArray *array, const Type *type, int len)
         return;
 
     doRefCntImpl(&vm->pages, array, type, TOK_MINUSMINUS);
+    array->data = NULL;
     doAllocDynArray(&vm->pages, array, type, len, vm->error);
 }
 

@@ -2,6 +2,7 @@
 
 #include "UEmkaHostFunctions.h"
 #include "UEmkaHostFunctionsInternal.h"
+#include "Engine/World.h"
 #include "HAL/CriticalSection.h"
 #include "Misc/ScopeLock.h"
 
@@ -16,6 +17,8 @@ struct FRegisteredModule
 FCriticalSection RegistryMutex;
 TMap<FString, FRegisteredModule> RegisteredModules;
 int32 LiveVMCount = 0;
+thread_local const UEmkaHostFunctions::FCallContext* CurrentContext = nullptr;
+UEmkaHostFunctions::FObjectHandle LastObjectHandle = 0;
 
 bool IsValidModulePath(const FString& Path)
 {
@@ -64,6 +67,70 @@ bool CanMutateRegistry(FString& Error)
 	UEmkaRuntime::ResetIdleSessions();
 	return true;
 }
+}
+
+const UEmkaHostFunctions::FCallContext* UEmkaHostFunctions::GetCurrentContext()
+{
+	return IsInGameThread() ? CurrentContext : nullptr;
+}
+
+UObject* UEmkaHostFunctions::FCallContext::GetCaller() const
+{
+	return GetCurrentContext() == this ? Caller.Get() : nullptr;
+}
+
+UWorld* UEmkaHostFunctions::FCallContext::GetWorld() const
+{
+	return GetCurrentContext() == this ? World.Get() : nullptr;
+}
+
+FGuid UEmkaHostFunctions::FCallContext::GetSessionId() const
+{
+	return GetCurrentContext() == this ? SessionId : FGuid{};
+}
+
+UEmkaHostFunctions::FObjectHandle UEmkaHostFunctions::FCallContext::CreateObjectHandle(UObject* Object) const
+{
+	if (GetCurrentContext() != this || !Handles || !IsValid(Object)) return 0;
+	FObjectHandle Existing = 0;
+	for (auto It = Handles->Objects.CreateIterator(); It; ++It)
+	{
+		UObject* Candidate = It.Value().Get();
+		if (!Candidate) It.RemoveCurrent();
+		else if (Candidate == Object) Existing = It.Key();
+	}
+	if (Existing != 0) return Existing;
+	// Tokens are never recycled, including after a reset or UObject address reuse.
+	if (LastObjectHandle == MAX_uint64) return 0;
+	const FObjectHandle Handle = ++LastObjectHandle;
+	Handles->Objects.Add(Handle, Object);
+	return Handle;
+}
+
+UObject* UEmkaHostFunctions::FCallContext::ResolveObjectHandle(const FObjectHandle Handle) const
+{
+	if (GetCurrentContext() != this || !Handles || Handle == 0) return nullptr;
+	const TWeakObjectPtr<UObject>* Object = Handles->Objects.Find(Handle);
+	return Object ? Object->Get() : nullptr;
+}
+
+UEmkaHostFunctions::FScopedCallContext::FScopedCallContext(UObject* Caller, const FGuid& SessionId, FObjectHandles* Handles)
+	: Previous(CurrentContext)
+{
+	if (IsInGameThread())
+	{
+		Context.Caller = Caller;
+		Context.World = IsValid(Caller) ? Caller->GetWorld() : nullptr;
+		Context.SessionId = SessionId;
+		Context.Handles = Handles;
+		CurrentContext = &Context;
+	}
+	else CurrentContext = nullptr;
+}
+
+UEmkaHostFunctions::FScopedCallContext::~FScopedCallContext()
+{
+	CurrentContext = Previous;
 }
 
 bool UEmkaHostFunctions::RegisterModule(const FString& ModulePath, const FString& Source, const TConstArrayView<FFunction> Functions, FString& Error)

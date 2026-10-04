@@ -5,6 +5,9 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "Misc/ScopeExit.h"
+#include "UEmkaFunctionLibrary.h"
+#include "UObject/StrongObjectPtr.h"
 #include "umka_api.h"
 
 namespace
@@ -63,6 +66,14 @@ void NestedBudgetCallback(UmkaStackSlot* Params, UmkaStackSlot* Result)
 void CountNativeDeallocation(UmkaStackSlot* Params, UmkaStackSlot* Result)
 {
 	++**static_cast<int32**>(umkaGetParam(Params, 0)->ptrVal);
+}
+
+void HeapAllocationCallback(UmkaStackSlot* Params, UmkaStackSlot* Result)
+{
+	Umka* Vm = static_cast<Umka*>(Result->ptrVal);
+	umkaAllocData(Vm, 4 * 1024 * 1024, nullptr);
+	*static_cast<bool*>(umkaGetMetadata(Vm)) = true;
+	Result->intVal = 1;
 }
 }
 
@@ -213,6 +224,141 @@ bool FUEmkaNativeTypeModuleIdentityTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Unknown type names do not share a declaration"), umkaTypeSameDeclaration(Vm, umkaGetFuncParamTypeByIndex(FunctionType, 0), "ue.um", "Missing"));
 	}
 	umkaFree(Vm);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaNativeHeapBudgetTest, "UEmka.Runtime.NativeHeapBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaNativeHeapBudgetTest::RunTest(const FString& Parameters)
+{
+	constexpr int64 HeapLimit = 2 * 1024 * 1024;
+	const char* Source = "fn Take*(Values: []int, Record: struct { X: int }) {}\n"
+		"fn Grow*(): int { Values := make([]int, 1000000); return len(Values) }\n"
+		"fn Child() {}\nfn Fib*() { F := make(fiber, Child); resume(F) }\nfn main() {}\n";
+	for (const int64 InvalidLimit : {int64{1}, int64{-1}})
+	{
+		Umka* Vm = CompileBudgetFixture(*this, Source);
+		if (!Vm) return false;
+		TestFalse(TEXT("Invalid or already exceeded heap cap fails safely"), umkaSetHeapBudget(Vm, InvalidLimit));
+		TestFalse(TEXT("Rejected heap budget leaves the VM dead"), umkaAlive(Vm));
+		TestEqual(TEXT("Heap cap failure has a normal error report"), FString(UTF8_TO_TCHAR(umkaGetError(Vm)->msg)),
+			FString(InvalidLimit < 0 ? TEXT("Illegal heap budget") : TEXT("Heap budget exceeded")));
+		umkaFree(Vm);
+	}
+	{
+		Umka* Vm = umkaAlloc();
+		if (!TestNotNull(TEXT("Precompile heap VM allocated"), Vm)) return false;
+		if (!TestTrue(TEXT("Precompile heap VM initialized"), umkaInit(Vm, "heap-init.um", "fn main() {}", 100000, nullptr, 0, nullptr, false, false, nullptr))) { umkaFree(Vm); return false; }
+		TestFalse(TEXT("Heap budget rejects an undersized initial stack cap before compilation"), umkaSetHeapBudget(Vm, 1));
+		umkaFree(Vm);
+	}
+	for (const char* Function : {"Grow", "Fib"})
+	{
+		Umka* Vm = CompileBudgetFixture(*this, Source);
+		if (!Vm) return false;
+		UmkaFuncContext Context = {};
+		umkaGetFunc(Vm, nullptr, Function, &Context);
+		TestTrue(TEXT("Heap budget includes the existing stack"), umkaSetHeapBudget(Vm, HeapLimit));
+		TestTrue(TEXT("Script allocations and child fiber stacks obey the heap cap"), umkaCall(Vm, &Context) != 0);
+		TestEqual(TEXT("Bytecode allocation reports heap exhaustion"), FString(UTF8_TO_TCHAR(umkaGetError(Vm)->msg)), FString(TEXT("Heap budget exceeded")));
+		TestTrue(TEXT("Heap exhaustion retains its source line"), umkaGetError(Vm)->line > 0);
+		umkaFree(Vm);
+	}
+	for (int32 Api = 0; Api < 4; ++Api)
+	{
+		Umka* Vm = CompileBudgetFixture(*this, Source);
+		if (!Vm) return false;
+		const UmkaType* FnType = umkaGetFuncType(Vm, nullptr, "Take");
+		TestTrue(TEXT("Native marshaling cap is configured"), umkaSetHeapBudget(Vm, umkaGetMemUsage(Vm) + 4096));
+		if (Api == 0) TestNull(TEXT("Native raw allocation returns null on exhaustion"), umkaAllocData(Vm, 4 * 1024 * 1024, nullptr));
+		if (Api == 1) TestNull(TEXT("Native string allocation returns null on exhaustion"), umkaMakeStr(Vm, "argument"));
+		if (Api == 2)
+		{
+			UmkaDynArray(int64) Array = {};
+			umkaMakeDynArray(Vm, &Array, umkaGetFuncParamTypeByIndex(FnType, 0), 1000000);
+			TestNull(TEXT("Native array failure leaves null data"), Array.data);
+		}
+		if (Api == 3) TestNull(TEXT("Native struct allocation returns null on exhaustion"), umkaMakeStruct(Vm, umkaGetFuncParamTypeByIndex(FnType, 1)));
+		TestEqual(TEXT("Native allocation has a live protected error target"), FString(UTF8_TO_TCHAR(umkaGetError(Vm)->msg)), FString(TEXT("Heap budget exceeded")));
+		TestFalse(TEXT("Native marshaling failure kills the VM"), umkaAlive(Vm));
+		umkaFree(Vm);
+	}
+	Umka* Vm = CompileBudgetFixture(*this,
+		"fn Host(): int;\nfn Outer*(): int { return Host() }\nfn main() {}\n", HeapAllocationCallback);
+	if (!Vm) return false;
+	bool bCallbackReturned = false;
+	umkaSetMetadata(Vm, &bCallbackReturned);
+	UmkaFuncContext Context = {};
+	umkaGetFunc(Vm, nullptr, "Outer", &Context);
+	TestTrue(TEXT("Nested allocation cap is configured"), umkaSetHeapBudget(Vm, HeapLimit));
+	TestTrue(TEXT("Native callback allocation unwinds the live outer call"), umkaCall(Vm, &Context) != 0);
+	TestFalse(TEXT("Nested allocation cannot return after fatal exhaustion"), bCallbackReturned);
+	TestEqual(TEXT("Nested allocation keeps the heap error"), FString(UTF8_TO_TCHAR(umkaGetError(Vm)->msg)), FString(TEXT("Heap budget exceeded")));
+	umkaFree(Vm);
+	Vm = CompileBudgetFixture(*this, Source);
+	if (!Vm) return false;
+	void* Large = umkaAllocData(Vm, 4 * 1024 * 1024, nullptr);
+	if (!TestNotNull(TEXT("Unlimited heap permits large allocations"), Large)) { umkaFree(Vm); return false; }
+	const int64 ReservedPayload = umkaGetMemUsage(Vm);
+	umkaDecRef(Vm, Large);
+	TestEqual(TEXT("Recycled pages retain their reserved bytes"), umkaGetMemUsage(Vm), ReservedPayload);
+	TestTrue(TEXT("Existing recycled pages fit the configured cap"), umkaSetHeapBudget(Vm, ReservedPayload + 4096));
+	void* Smaller = umkaAllocData(Vm, 2 * 1024 * 1024, nullptr);
+	TestNotNull(TEXT("A recycled oversized page can be reused within the cap"), Smaller);
+	TestEqual(TEXT("Recycling preserves the original allocation capacity"), umkaGetMemUsage(Vm), ReservedPayload);
+	if (Smaller) umkaDecRef(Vm, Smaller);
+	TestFalse(TEXT("Heap page headers count towards the cap"), umkaSetHeapBudget(Vm, ReservedPayload));
+	umkaFree(Vm);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaConfiguredHeapBudgetTest, "UEmka.Runtime.ConfiguredHeapBudget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaConfiguredHeapBudgetTest::RunTest(const FString& Parameters)
+{
+	ON_SCOPE_EXIT { UUEmkaFunctionLibrary::ResetAllRuntimeSessions(); };
+	TStrongObjectPtr<UObject> Caller(NewObject<UUEmkaScriptAsset>());
+	const FString Script = TEXT("var Count: int\nfn Recover*(Grow: bool): int { Count++; if Grow { Values := make([]int, 1000000); return len(Values) }; return Count }");
+	FUEmkaScriptParam Result;
+	FString Error;
+	AddExpectedError(TEXT("Heap budget exceeded"), EAutomationExpectedErrorFlags::Contains, 5);
+	for (const bool bSession : {false, true})
+	{
+		FUEmkaExecutionOptions Options;
+		Options.bUseSession = bSession;
+		Options.MaxHeapBytes = 2 * 1024 * 1024;
+		const FGuid SessionId = FGuid::NewGuid();
+		const auto Run = [&](bool bGrow)
+		{
+			return UUEmkaFunctionLibrary::RunUmkaInlineConfigured(Caller.Get(), Script, TEXT("Recover"),
+				{UUEmkaFunctionLibrary::MakeBoolParam(bGrow)}, EUEmkaValueType::Int, false, false, Result, Error, SessionId, Options);
+		};
+		TestTrue(TEXT("Finite configured heap call succeeds"), Run(false));
+		TestTrue(TEXT("Another finite configured call succeeds"), Run(false));
+		TestEqual(TEXT("Heap cap preserves requested session behavior"), Result.IntValue, bSession ? int64{2} : int64{1});
+		TestFalse(TEXT("Configured heap exhaustion fails"), Run(true));
+		TestTrue(TEXT("Configured heap diagnostic remains visible"), Error.Contains(TEXT("Heap budget exceeded")));
+		TestEqual(TEXT("Heap failure clears the result"), Result.IntValue, int64{0});
+		TestTrue(TEXT("A failed heap session recovers on a fresh VM"), Run(false));
+		TestEqual(TEXT("Recovered globals restart"), Result.IntValue, int64{1});
+		Options.MaxHeapBytes = 1;
+		TestFalse(TEXT("Caps below initialized heap fail safely"), Run(false));
+		TestTrue(TEXT("Tiny cap reports heap exhaustion"), Error.Contains(TEXT("Heap budget exceeded")));
+	}
+	FUEmkaExecutionOptions Options;
+	Options.MaxHeapBytes = 2 * 1024 * 1024;
+	FUEmkaScriptParam Text;
+	Text.Type = EUEmkaValueType::Str;
+	Text.StringValue = FString::ChrN(1024 * 1024, TEXT('x'));
+	TestFalse(TEXT("Input string marshaling obeys the heap cap before execution"), UUEmkaFunctionLibrary::RunUmkaInlineConfigured(Caller.Get(),
+		TEXT("fn Echo*(Value: str): int { return len(Value) }"), TEXT("Echo"), {Text}, EUEmkaValueType::Int, false, false, Result, Error, FGuid::NewGuid(), Options));
+	TestTrue(TEXT("Input marshaling retains the heap error"), Error.Contains(TEXT("Heap budget exceeded")));
+	Options.MaxHeapBytes = -1;
+	AddExpectedError(TEXT("Heap budget cannot be negative"), EAutomationExpectedErrorFlags::Contains, 1);
+	TestFalse(TEXT("Configured negative heap limits are rejected before creating a VM"), UUEmkaFunctionLibrary::RunUmkaInlineConfigured(Caller.Get(),
+		TEXT("fn Test*(): int { return 1 }"), TEXT("Test"), {}, EUEmkaValueType::Int, false, false, Result, Error, FGuid::NewGuid(), Options));
 	return true;
 }
 

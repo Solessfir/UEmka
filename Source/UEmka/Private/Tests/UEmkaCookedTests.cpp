@@ -167,9 +167,12 @@ bool FUEmkaCookedExecutionControlTest::RunTest(const FString& Parameters)
 	UFunction* Session = Runner->FindFunctionByName(TEXT("ExecuteCookedSession"));
 	UFunction* Status = Runner->FindFunctionByName(TEXT("ExecuteCookedStatus"));
 	UFunction* Budget = Runner->FindFunctionByName(TEXT("ExecuteCookedBudget"));
+	UFunction* CallerReset = Runner->FindFunctionByName(TEXT("ResetCookedCaller"));
 	if (!TestNotNull(TEXT("Cooked session function"), Session) || !TestNotNull(TEXT("Cooked status function"), Status)
-		|| !TestNotNull(TEXT("Cooked budget function"), Budget)) return false;
+		|| !TestNotNull(TEXT("Cooked budget function"), Budget) || !TestNotNull(TEXT("Cooked caller reset function"), CallerReset)) return false;
 	FStructOnScope SessionValues(Session);
+	FBoolProperty* Reset = FindFProperty<FBoolProperty>(Session, TEXT("ResetSession"));
+	if (!TestNotNull(TEXT("Cooked Reset Session input survives"), Reset)) return false;
 	First->ProcessEvent(Session, SessionValues.GetStructMemory());
 	CheckStatus(*this, Session, SessionValues.GetStructMemory(), true);
 	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 1);
@@ -177,6 +180,21 @@ bool FUEmkaCookedExecutionControlTest::RunTest(const FString& Parameters)
 	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 2);
 	Second->ProcessEvent(Session, SessionValues.GetStructMemory());
 	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 1);
+	Reset->SetPropertyValue_InContainer(SessionValues.GetStructMemory(), true);
+	First->ProcessEvent(Session, SessionValues.GetStructMemory());
+	CheckStatus(*this, Session, SessionValues.GetStructMemory(), true);
+	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 1);
+	Reset->SetPropertyValue_InContainer(SessionValues.GetStructMemory(), false);
+	First->ProcessEvent(Session, SessionValues.GetStructMemory());
+	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 2);
+	Second->ProcessEvent(Session, SessionValues.GetStructMemory());
+	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 2);
+	FStructOnScope ResetValues(CallerReset);
+	First->ProcessEvent(CallerReset, ResetValues.GetStructMemory());
+	First->ProcessEvent(Session, SessionValues.GetStructMemory());
+	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 1);
+	Second->ProcessEvent(Session, SessionValues.GetStructMemory());
+	CheckIntResult(*this, Session, SessionValues.GetStructMemory(), 3);
 	FStructOnScope StatusValues(Status);
 	FInt64Property* Denominator = FindFProperty<FInt64Property>(Status, TEXT("Value"));
 	if (!TestNotNull(TEXT("Cooked division input"), Denominator)) return false;
@@ -198,6 +216,29 @@ bool FUEmkaCookedExecutionControlTest::RunTest(const FString& Parameters)
 	First->ProcessEvent(Budget, BudgetValues.GetStructMemory());
 	CheckStatus(*this, Budget, BudgetValues.GetStructMemory(), false);
 	CheckIntResult(*this, Budget, BudgetValues.GetStructMemory(), 0);
+	AddExpectedError(TEXT("Heap budget exceeded"), EAutomationExpectedErrorFlags::Contains, 2);
+	for (const FName Name : {FName(TEXT("ExecuteCookedHeap")), FName(TEXT("ExecuteCookedSessionHeap"))})
+	{
+		UFunction* Heap = Runner->FindFunctionByName(Name);
+		if (!TestNotNull(TEXT("Cooked heap function"), Heap)) return false;
+		FStructOnScope HeapValues(Heap);
+		FInt64Property* Count = FindFProperty<FInt64Property>(Heap, TEXT("Count"));
+		FStrProperty* Error = FindFProperty<FStrProperty>(Heap, TEXT("OutError"));
+		if (!TestNotNull(TEXT("Cooked heap allocation input"), Count) || !TestNotNull(TEXT("Cooked heap error output"), Error)) return false;
+		Count->SetPropertyValue_InContainer(HeapValues.GetStructMemory(), 8);
+		First->ProcessEvent(Heap, HeapValues.GetStructMemory());
+		CheckStatus(*this, Heap, HeapValues.GetStructMemory(), true);
+		CheckIntResult(*this, Heap, HeapValues.GetStructMemory(), 8);
+		Count->SetPropertyValue_InContainer(HeapValues.GetStructMemory(), 1000000);
+		First->ProcessEvent(Heap, HeapValues.GetStructMemory());
+		CheckStatus(*this, Heap, HeapValues.GetStructMemory(), false);
+		CheckIntResult(*this, Heap, HeapValues.GetStructMemory(), 0);
+		TestTrue(TEXT("Cooked heap diagnostic survives"), Error->GetPropertyValue_InContainer(HeapValues.GetStructMemory()).Contains(TEXT("Heap budget exceeded")));
+		Count->SetPropertyValue_InContainer(HeapValues.GetStructMemory(), 16);
+		First->ProcessEvent(Heap, HeapValues.GetStructMemory());
+		CheckStatus(*this, Heap, HeapValues.GetStructMemory(), true);
+		CheckIntResult(*this, Heap, HeapValues.GetStructMemory(), 16);
+	}
 	return true;
 }
 

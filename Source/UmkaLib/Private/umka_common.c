@@ -177,7 +177,7 @@ static void *moduleLoadImplLib(const char *path)
 {
 #ifdef UMKA_EXT_LIBS
     #ifdef _WIN32
-        return LoadLibrary(path);
+        return LoadLibraryA(path);
     #else
         return dlopen(path, RTLD_LOCAL | RTLD_LAZY);
     #endif
@@ -216,7 +216,8 @@ static void *moduleLoadImplLibFunc(void *lib, const char *name)
 static char *moduleCurFolder(char *buf, int size)
 {
 #ifdef _WIN32
-    if (GetCurrentDirectory(size, buf) == 0)
+    const DWORD pathLength = GetCurrentDirectoryA(size, buf);
+    if (pathLength == 0 || pathLength >= (DWORD)size)
         return NULL;
 #else
     if (!getcwd(buf, size))

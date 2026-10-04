@@ -329,9 +329,10 @@ bool FUEmkaModuleIsolationTest::RunTest(const FString& Parameters)
 	const FString Script = FString::Printf(TEXT("import disk = \"%s\"\nfn Test*(): int { return disk::Value() }"), *DiskPath);
 	FString Error;
 	int32 Line;
-	TestTrue(TEXT("Inline compiler preserves disk import compatibility"), UUEmkaFunctionLibrary::CompileCheckScript(Script, Error, Line));
+	const bool bDiskImportCompiled = UUEmkaFunctionLibrary::CompileCheckScript(Script, Error, Line);
+	TestTrue(FString::Printf(TEXT("Inline compiler preserves disk import compatibility (%s): %s"), *DiskPath, *Error), bDiskImportCompiled);
 	TestFalse(TEXT("Asset compiler refuses an existing unregistered disk module"), UUEmkaFunctionLibrary::CompileCheckScript(Script, Error, Line, {}, TEXT("main.um"), false));
-	TestTrue(TEXT("Missing module diagnostic explains registration"), Error.Contains(TEXT("not registered")));
+	TestTrue(FString::Printf(TEXT("Missing module diagnostic explains registration: %s"), *Error), Error.Contains(TEXT("not registered")));
 	IFileManager::Get().Delete(*DiskPath);
 	TestTrue(TEXT("Builtin modules remain available without files"), UUEmkaFunctionLibrary::CompileCheckScript(TEXT("import \"std.um\"\nfn Test*(): real { return std::pi }"), Error, Line, {}, TEXT("main.um"), false));
 	const TArray<FUEmkaModuleSource> Duplicate = {{TEXT("same.um"), TEXT("const Value* = 1")}, {TEXT("same.um"), TEXT("const Value* = 2")}};

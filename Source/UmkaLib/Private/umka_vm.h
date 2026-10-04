@@ -151,6 +151,7 @@ typedef struct tagHeapPage
     int numChunks, numOccupiedChunks, numChunksWithOnFree, chunkSize;
     struct tagHeapPage *prev, *next;
     char *end;
+    int64_t allocationSize;
     int64_t data[];
 } HeapPage;
 
@@ -161,6 +162,7 @@ typedef struct
     char *lowest, *highest;
     int freeId;
     int64_t totalSize, blacklistedSize;
+    int64_t allocatedSize, maxHeapBytes;
     struct tagFiber *fiber;
     int64_t leakSanLevel;
     RefCntCandidates refCntCandidates;

@@ -5,8 +5,39 @@
 #include "CoreMinimal.h"
 #include "umka_api.h"
 
+class UWorld;
+
 namespace UEmkaHostFunctions
 {
+struct FObjectHandles;
+class FScopedCallContext;
+
+using FObjectHandle = uint64;
+
+// Available only during game-thread execution; never retain the context pointer after a callback.
+class UEMKA_API FCallContext
+{
+public:
+	UObject* GetCaller() const;
+	UWorld* GetWorld() const;
+	FGuid GetSessionId() const;
+	FObjectHandle CreateObjectHandle(UObject* Object) const;
+	UObject* ResolveObjectHandle(FObjectHandle Handle) const;
+
+	FCallContext(const FCallContext&) = delete;
+	FCallContext& operator=(const FCallContext&) = delete;
+
+private:
+	friend class FScopedCallContext;
+	FCallContext() = default;
+	TWeakObjectPtr<UObject> Caller;
+	TWeakObjectPtr<UWorld> World;
+	FGuid SessionId;
+	FObjectHandles* Handles = nullptr;
+};
+
+UEMKA_API const FCallContext* GetCurrentContext();
+
 struct UEMKA_API FFunction
 {
 	FString Name;
