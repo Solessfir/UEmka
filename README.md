@@ -215,7 +215,7 @@ Captured output is limited to 64 KB per execution - anything beyond that is drop
 
 **Compile-time:** The node validates your script every time you compile the Blueprint. Errors are reported in the compiler results panel and the error line is highlighted red in the editor.
 
-**Runtime:** If the script fails during execution, the error is logged to the Output Log under the `LogUEmka` category, including the calling Blueprint path and function name.
+**Runtime:** If initialization, parameter validation, or script execution fails, the error is logged to the Output Log under the `LogUEmka` category, including the calling Blueprint path and function name. Failed executions clear their outputs so values from an earlier call cannot be reused.
 
 
 ## Limitations

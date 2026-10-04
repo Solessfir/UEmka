@@ -729,6 +729,7 @@ FUEmkaSignature UK2Node_UEmka::ParseScript(const FString& InScript)
 				else if (TypeName.IsEmpty())
 				{
 					Sig.UnsupportedReason = TEXT("multi-return item has an unsupported non-scalar type");
+					break;
 				}
 				SkipWhitespace();
 				if (Pos < Len && StructuralScript[Pos] == ',') ++Pos;
@@ -1139,15 +1140,15 @@ void UK2Node_UEmka::OnScriptChanged(const FString& NewScript)
 		{
 			GetGraph()->NotifyGraphChanged();
 		}
-
-		if (UBlueprint* BP = FBlueprintEditorUtils::FindBlueprintForNode(this))
-		{
-			FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
-		}
 	}
 	else
 	{
 		ParsedSignature = NewSig;
+	}
+
+	if (UBlueprint* BP = FBlueprintEditorUtils::FindBlueprintForNode(this))
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
 	}
 }
 
@@ -1160,6 +1161,7 @@ static FName GetMakeParamFuncName(const EUEmkaValueType Type, const bool bIsArra
 {
 	if (bIsArray)
 	{
+		if (Type == EUEmkaValueType::Bool) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeBoolArrayParam);
 		if (Type == EUEmkaValueType::Real)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeRealArrayParam);
 		if (Type == EUEmkaValueType::Real32)							   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeReal32ArrayParam);
 		if (Type == EUEmkaValueType::Str)								   return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, MakeStrArrayParam);
@@ -1181,6 +1183,7 @@ static FName GetGetResultFuncName(const EUEmkaValueType RetType, const bool bIsA
 {
 	if (bIsArray)
 	{
+		if (RetType == EUEmkaValueType::Bool) return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetBoolArrayResult);
 		if (RetType == EUEmkaValueType::Real)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetRealArrayResult);
 		if (RetType == EUEmkaValueType::Real32)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetReal32ArrayResult);
 		if (RetType == EUEmkaValueType::Str)									 return GET_FUNCTION_NAME_CHECKED(UUEmkaFunctionLibrary, GetStrArrayResult);
