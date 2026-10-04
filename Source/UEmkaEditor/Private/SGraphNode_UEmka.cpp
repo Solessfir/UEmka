@@ -90,7 +90,7 @@ FReply SGraphNode_UEmka::OnTextBoxKeyDown(const FGeometry& Geometry, const FKeyE
 			const int32 LineIndex = CursorLoc.GetLineIndex();
 
 			TArray<FString> Lines;
-			CodeEditor->GetText().ToString().ParseIntoArrayLines(Lines, false);
+			CodeEditor->GetPlainText().ToString().ParseIntoArrayLines(Lines, false);
 
 			if (Lines.IsValidIndex(LineIndex))
 			{
@@ -124,7 +124,7 @@ EActiveTimerReturnType SGraphNode_UEmka::RecheckAfterUndoRedo(double InCurrentTi
 	{
 		FString CompileError;
 		int32 ErrorLine = -1;
-		UUEmkaFunctionLibrary::CompileCheckScript(CodeEditor->GetText().ToString(), CompileError, ErrorLine);
+		UUEmkaFunctionLibrary::CompileCheckScript(CodeEditor->GetPlainText().ToString(), CompileError, ErrorLine);
 		SyntaxHighlighter->SetErrorLine(ErrorLine);
 		CodeEditor->Invalidate(EInvalidateWidgetReason::Layout);
 	}

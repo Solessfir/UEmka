@@ -194,21 +194,20 @@ void FUEmkaSyntaxHighlighter::ClassifyToken(const FString& Source, const FSyntax
 		return;
 	}
 
-	// ---- Inside string ----
-	if (State == EParserState::InString)
+	if (State == EParserState::InString || State == EParserState::InChar)
 	{
 		OutInfo.Name = TEXT("UEmka.String");
 		OutStyle = StringStyle;
-		if (TokenText == TEXT("\"")) State = EParserState::None;
-		return;
-	}
-
-	// ---- Inside char literal ----
-	if (State == EParserState::InChar)
-	{
-		OutInfo.Name = TEXT("UEmka.String");
-		OutStyle = StringStyle;
-		if (TokenText == TEXT("'")) State = EParserState::None;
+		const TCHAR ClosingQuote = State == EParserState::InString ? TEXT('"') : TEXT('\'');
+		if (TokenText.Len() == 1 && TokenText[0] == ClosingQuote)
+		{
+			int32 Backslashes = 0;
+			for (int32 Index = Token.Range.BeginIndex - 1; Index >= 0 && Source[Index] == TEXT('\\'); --Index)
+			{
+				++Backslashes;
+			}
+			if (Backslashes % 2 == 0) State = EParserState::None;
+		}
 		return;
 	}
 

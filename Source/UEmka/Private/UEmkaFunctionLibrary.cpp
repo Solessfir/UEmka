@@ -458,6 +458,20 @@ struct FUmkaStdoutCapture
 	int32 Pipe[2] = {-1, -1};
 	int32 SavedFd = -1;
 	bool bActive = false;
+	bool bStdoutLocked = false;
+
+	void UnlockStdout()
+	{
+		if (bStdoutLocked)
+		{
+			#if PLATFORM_WINDOWS
+			_unlock_file(stdout);
+			#else
+			funlockfile(stdout);
+			#endif
+			bStdoutLocked = false;
+		}
+	}
 
 	static bool MakeWriteEndNonBlocking(const int32 Fd)
 	{
@@ -479,6 +493,14 @@ struct FUmkaStdoutCapture
 
 	FUmkaStdoutCapture()
 	{
+		// Other threads, including UE's console logger, must not write into the redirected stream.
+		#if PLATFORM_WINDOWS
+		_lock_file(stdout);
+		#else
+		flockfile(stdout);
+		#endif
+		bStdoutLocked = true;
+		fflush(stdout);
 		if (UMKA_FILENO(stdout) < 0 || !UMKA_PIPE(Pipe, BufSize))
 		{
 			return;
@@ -516,12 +538,15 @@ struct FUmkaStdoutCapture
 	{
 		if (!bActive)
 		{
+			UnlockStdout();
 			return;
 		}
 
+		bool bDroppedOutput = false;
 		if (SavedFd != -1)
 		{
 			fflush(stdout);
+			bDroppedOutput = ferror(stdout) != 0;
 			UMKA_DUP2(SavedFd, UMKA_FILENO(stdout));
 			UMKA_CLOSE(SavedFd);
 			SavedFd = -1;
@@ -529,6 +554,7 @@ struct FUmkaStdoutCapture
 			// which would silently disable all printf in the process from now on
 			clearerr(stdout);
 		}
+		UnlockStdout();
 
 		if (Pipe[0] != -1)
 		{
@@ -538,9 +564,9 @@ struct FUmkaStdoutCapture
 			UMKA_CLOSE(Pipe[0]);
 			Pipe[0] = -1;
 
-			if (BytesRead == BufSize)
+			if (bDroppedOutput || BytesRead == BufSize)
 			{
-				UE_LOG(LogUEmka, Warning, TEXT("[%s] printf output exceeded %d KB - excess was dropped"), *FunctionName, BufSize / 1024);
+				UE_LOG(LogUEmka, Warning, TEXT("[%s] printf output exceeded capture capacity - excess was dropped"), *FunctionName);
 			}
 			if (BytesRead > 0)
 			{
@@ -578,6 +604,7 @@ struct FUmkaStdoutCapture
 		{
 			UMKA_CLOSE(Pipe[0]);
 		}
+		UnlockStdout();
 	}
 };
 #endif

@@ -222,7 +222,7 @@ fn foo*(x: int): int {
 LogUEmka: [foo] input: 42
 ```
 
-Captured output is limited to 64 KB per execution - anything beyond that is dropped and a truncation warning is logged.
+Captured output is limited to at most 64 KB per execution; the operating system's pipe capacity can lower this limit. Excess output is dropped and a truncation warning is logged. Concurrent script calls serialize stdout capture so their output keeps the correct function prefix.
 
 
 ## Error Handling
@@ -256,3 +256,11 @@ fn length*(x: real, y: real): real {
     return math.sqrt(v.x*v.x + v.y*v.y)
 }
 ```
+
+## Tests
+
+Run the `UEmka` group in Unreal Editor's Automation window, or launch the editor with `-unattended -nullrhi -nosound -ExecCmds="Automation RunTests UEmka;Quit"`.
+
+The suite covers every supported scalar type and enum integer base, aliases, dynamic and fixed arrays, empty dynamic arrays, integer boundaries, Unicode strings, mixed tuples, flat structs, and generated struct wrappers. Blueprint tests compile and execute all type and array mappings through connected input and output pins. Additional tests cover rejected signatures, runtime failures and output resets, logging and concurrent capture, graph reconstruction, transaction undo/redo, package save/load, embedded editor input, and syntax highlighting.
+
+These are integration and regression tests for the plugin's supported interfaces, rather than exhaustive tests of the Umka language or a measured line-coverage guarantee. Platform-specific logging behavior still needs validation on each supported platform.

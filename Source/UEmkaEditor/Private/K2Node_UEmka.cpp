@@ -1086,8 +1086,7 @@ void UK2Node_UEmka::PostEditUndo()
 		LastErrorMessage.Empty();
 	}
 
-	// Super rebuilds the node (ReconstructNode -> AllocateDefaultPins -> UpdateGraphNode),
-	// which picks up the freshly set LastErrorLine for the syntax highlighter.
+	// Super resolves the pin references restored by the transaction.
 	Super::PostEditUndo();
 }
 

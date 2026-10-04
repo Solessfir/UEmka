@@ -55,8 +55,11 @@ bool FUEmkaTupleParsingTest::RunTest(const FString& Parameters)
 			Signature.ReturnParams.IsEmpty() && !Signature.ReturnType.IsSet());
 	}
 
-	const FUEmkaSignature Signature = UK2Node_UEmka::ParseScript(
-		TEXT("type Kind = enum(uint8) { First, Second }\nfn Test*(): (int, []bool, [2]bool, Kind) {}"));
+	const FString Script = TEXT("type Kind = enum(uint8) { First; Second }\nfn Test*(): (int, []bool, [2]bool, Kind) { return 1, []bool{true, false}, [2]bool{true, false}, .First }");
+	FString Error;
+	int32 ErrorLine;
+	TestTrue(TEXT("Supported tuple compiles"), UUEmkaFunctionLibrary::CompileCheckScript(Script, Error, ErrorLine));
+	const FUEmkaSignature Signature = UK2Node_UEmka::ParseScript(Script);
 	TestTrue(TEXT("Supported tuple is valid"), Signature.bValid && Signature.UnsupportedReason.IsEmpty());
 	if (TestEqual(TEXT("All tuple elements remain ordered"), Signature.ReturnParams.Num(), 4))
 	{
