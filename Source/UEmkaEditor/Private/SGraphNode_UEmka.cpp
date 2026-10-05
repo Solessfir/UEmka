@@ -39,8 +39,11 @@ bool SGraphNode_UEmka::IsScriptReadOnly() const
 
 FText SGraphNode_UEmka::GetSelectedFunctionText() const
 {
-	return UEmkaNode.IsValid() && !UEmkaNode->SelectedFunction.IsEmpty()
-		? FText::FromString(UEmkaNode->SelectedFunction) : LOCTEXT("AutomaticFunction", "Automatic (first export)");
+	if (UEmkaNode.IsValid() && !UEmkaNode->SelectedFunction.IsEmpty())
+	{
+		return FText::FromString(UEmkaNode->SelectedFunction);
+	}
+	return ExportedFunctions.IsEmpty() ? FText::GetEmpty() : FText::FromString(*ExportedFunctions[0]);
 }
 
 void SGraphNode_UEmka::OnFunctionSelected(TSharedPtr<FString> Function, ESelectInfo::Type SelectInfo)
@@ -195,7 +198,6 @@ void SGraphNode_UEmka::UpdateGraphNode()
 
 	const TSharedPtr<SNodeTitle> NodeTitle = SNew(SNodeTitle, GraphNode);
 	ExportedFunctions.Reset();
-	ExportedFunctions.Add(MakeShared<FString>());
 	TSharedPtr<FString> SelectedFunction;
 	if (UEmkaNode.IsValid())
 	{
@@ -203,6 +205,7 @@ void SGraphNode_UEmka::UpdateGraphNode()
 		{
 			ExportedFunctions.Add(MakeShared<FString>(Function));
 		}
+		if (UEmkaNode->SelectedFunction.IsEmpty() && !ExportedFunctions.IsEmpty()) SelectedFunction = ExportedFunctions[0];
 		for (const TSharedPtr<FString>& Function : ExportedFunctions)
 		{
 			if (UEmkaNode->SelectedFunction.Equals(*Function, ESearchCase::CaseSensitive))
@@ -318,16 +321,19 @@ void SGraphNode_UEmka::UpdateGraphNode()
 						.Padding(2.f, 0.f, 2.f, 4.f)
 						[
 							SNew(SComboBox<TSharedPtr<FString>>)
+							.Tag(TEXT("UEmka.FunctionSelector"))
+							.Visibility(ExportedFunctions.Num() > 1 ? EVisibility::Visible : EVisibility::Collapsed)
 							.OptionsSource(&ExportedFunctions)
 							.InitiallySelectedItem(SelectedFunction)
 							.OnGenerateWidget_Lambda([](TSharedPtr<FString> Function)
 							{
-								return SNew(STextBlock).Text(Function->IsEmpty()
-									? LOCTEXT("AutomaticFunction", "Automatic (first export)") : FText::FromString(*Function));
+								return SNew(STextBlock).Text(FText::FromString(*Function));
 							})
 							.OnSelectionChanged(this, &SGraphNode_UEmka::OnFunctionSelected)
 							[
-								SNew(STextBlock).Text(this, &SGraphNode_UEmka::GetSelectedFunctionText)
+								SNew(STextBlock)
+								.Tag(TEXT("UEmka.FunctionSelectorLabel"))
+								.Text(this, &SGraphNode_UEmka::GetSelectedFunctionText)
 							]
 						]
 						+ SVerticalBox::Slot()

@@ -3,9 +3,13 @@
 #include "UEmkaScriptAsset.h"
 #include UE_INLINE_GENERATED_CPP_BY_NAME(UEmkaScriptAsset)
 
-namespace
-{
-bool IsValidModulePath(const FString& Path)
+#if WITH_EDITORONLY_DATA
+#include "UObject/AssetRegistryTagsContext.h"
+#include "EditorFramework/AssetImportData.h"
+#include "UObject/UnrealType.h"
+#endif
+
+bool UUEmkaScriptAsset::IsValidModulePath(const FString& Path)
 {
 	if (Path.IsEmpty() || FTCHARToUTF8(*Path).Length() > 255 || !Path.EndsWith(TEXT(".um"), ESearchCase::CaseSensitive) || Path.StartsWith(TEXT("/")) || Path.Contains(TEXT("\\"))) return false;
 	for (const TCHAR Ch : Path)
@@ -21,6 +25,8 @@ bool IsValidModulePath(const FString& Path)
 	return true;
 }
 
+namespace
+{
 bool VisitAsset(const UUEmkaScriptAsset* Asset, const UUEmkaScriptAsset* Root, TMap<FString, const UUEmkaScriptAsset*>& Paths,
 	TSet<const UUEmkaScriptAsset*>& Visiting, TSet<const UUEmkaScriptAsset*>& Visited, TArray<FUEmkaModuleSource>& Modules, FString& Error)
 {
@@ -38,7 +44,7 @@ bool VisitAsset(const UUEmkaScriptAsset* Asset, const UUEmkaScriptAsset* Root, T
 	}
 	if (Visited.Contains(Asset)) return true;
 	const FString ModulePath = Asset->ModulePath.IsEmpty() ? Asset->GetName() + TEXT(".um") : Asset->ModulePath;
-	if (!IsValidModulePath(ModulePath))
+	if (!UUEmkaScriptAsset::IsValidModulePath(ModulePath))
 	{
 		Error = FString::Printf(TEXT("Invalid Umka module path '%s': use a relative .um filename of at most 255 UTF-8 bytes without empty, '.' or '..' segments"), *ModulePath);
 		return false;
@@ -83,8 +89,33 @@ bool UUEmkaScriptAsset::ResolveAsset(const UUEmkaScriptAsset* Asset, FString& Ou
 	return true;
 }
 
+#if WITH_EDITORONLY_DATA
+void UUEmkaScriptAsset::PostInitProperties()
+{
+	Super::PostInitProperties();
+	if (!HasAnyFlags(RF_ClassDefaultObject)) AssetImportData = NewObject<UAssetImportData>(this, TEXT("AssetImportData"), RF_Transactional);
+}
+
+void UUEmkaScriptAsset::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+	if (AssetImportData) Context.AddTag(FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden));
+}
+#endif
+
 #if WITH_EDITOR
 UUEmkaScriptAsset::FOnScriptAssetChanged UUEmkaScriptAsset::OnScriptAssetChanged;
+
+bool UUEmkaScriptAsset::IsFileBacked() const
+{
+	return AssetImportData && !AssetImportData->GetFirstFilename().IsEmpty();
+}
+
+bool UUEmkaScriptAsset::CanEditChange(const FProperty* InProperty) const
+{
+	if (InProperty && InProperty->GetFName() == GET_MEMBER_NAME_CHECKED(UUEmkaScriptAsset, Source) && IsFileBacked()) return false;
+	return Super::CanEditChange(InProperty);
+}
 
 void UUEmkaScriptAsset::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {

@@ -8,18 +8,30 @@
 #include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
+#include "Framework/Application/SlateApplication.h"
 #include "HAL/FileManager.h"
+#include "IDetailsView.h"
+#include "Input/HittestGrid.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
+#include "PropertyEditorModule.h"
+#include "Rendering/DrawElements.h"
 #include "ScopedTransaction.h"
 #include "SGraphNode_UEmka.h"
 #include "UEmkaScriptAsset.h"
 #include "UEmkaScriptAssetFactory.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "UObject/UnrealType.h"
+#include "Types/PaintArgs.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/SVirtualWindow.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
+#include "Widgets/Input/SComboBox.h"
+#include "Widgets/Text/STextBlock.h"
 #include "Widgets/Text/SMultiLineEditableText.h"
 
 namespace
@@ -42,7 +54,7 @@ UK2Node_UEmka* MakeOptionsNode(UPackage* Package = GetTransientPackage())
 
 TSharedPtr<SWidget> FindOptionsWidget(const TSharedRef<SWidget>& Root, FName Type)
 {
-	if (Root->GetType() == Type) return Root;
+	if (Root->GetType() == Type || Root->GetTag() == Type) return Root;
 	FChildren* Children = Root->GetChildren();
 	for (int32 Index = 0; Index < Children->Num(); ++Index)
 	{
@@ -58,6 +70,21 @@ TSharedPtr<SMultiLineEditableTextBox> FindScriptEditor(const TSharedRef<SWidget>
 	for (int32 Index = 0; Index < Children->Num(); ++Index)
 	{
 		if (TSharedPtr<SMultiLineEditableTextBox> Editor = FindScriptEditor(Children->GetChildAt(Index))) return Editor;
+	}
+	return nullptr;
+}
+
+TSharedPtr<STextBlock> FindOptionsText(const TSharedRef<SWidget>& Root, const FString& Text)
+{
+	if (Root->GetType() == TEXT("STextBlock"))
+	{
+		const TSharedRef<STextBlock> Label = StaticCastSharedRef<STextBlock>(Root);
+		if (Label->GetText().ToString() == Text) return Label;
+	}
+	FChildren* Children = Root->GetChildren();
+	for (int32 Index = 0; Index < Children->Num(); ++Index)
+	{
+		if (TSharedPtr<STextBlock> Match = FindOptionsText(Children->GetChildAt(Index), Text)) return Match;
 	}
 	return nullptr;
 }
@@ -94,6 +121,132 @@ bool FUEmkaSelectedFunctionTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("Rejected selection never falls back to another export"), Missing.FunctionName, Name);
 		TestTrue(TEXT("Rejected choice exposes no data pins"), Missing.Params.IsEmpty() && !Missing.ReturnType.IsSet());
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaFunctionSelectorVisibilityTest, "UEmka.Editor.Options.FunctionSelectorVisibility",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaFunctionSelectorVisibilityTest::RunTest(const FString& Parameters)
+{
+	UK2Node_UEmka* Node = MakeOptionsNode();
+	Node->Script = TEXT("fn Only*(Value: int): int { return Value }");
+	Node->RefreshScript();
+	const TSharedRef<SGraphNode_UEmka> Widget = SNew(SGraphNode_UEmka, Node);
+	const auto GetSelector = [&]()
+	{
+		return StaticCastSharedPtr<SComboBox<TSharedPtr<FString>>>(FindOptionsWidget(Widget, TEXT("UEmka.FunctionSelector")));
+	};
+	TSharedPtr<SComboBox<TSharedPtr<FString>>> Selector = GetSelector();
+	if (!TestTrue(TEXT("Function selector widget exists"), Selector.IsValid())) return false;
+	TestTrue(TEXT("Single export hides the selector"), Selector->GetVisibility() == EVisibility::Collapsed);
+	if (TestTrue(TEXT("Single export is selected"), Selector->GetSelectedItem().IsValid()))
+	{
+		TestEqual(TEXT("Default selection is the actual function"), *Selector->GetSelectedItem(), FString(TEXT("Only")));
+	}
+	Node->OnScriptChanged(OptionsScript);
+	Widget->UpdateGraphNode();
+	Selector = GetSelector();
+	TestTrue(TEXT("Multiple exports show the selector"), Selector->GetVisibility() == EVisibility::Visible);
+	if (TestTrue(TEXT("First export is selected by default"), Selector->GetSelectedItem().IsValid()))
+	{
+		TestEqual(TEXT("Default entry names the first export"), *Selector->GetSelectedItem(), FString(TEXT("First")));
+	}
+	TSharedPtr<STextBlock> Label = StaticCastSharedPtr<STextBlock>(FindOptionsWidget(Widget, TEXT("UEmka.FunctionSelectorLabel")));
+	if (TestTrue(TEXT("Selector label exists"), Label.IsValid()))
+	{
+		TestEqual(TEXT("Default label names the function"), Label->GetText().ToString(), FString(TEXT("First")));
+	}
+	Node->SelectedFunction = TEXT("Second");
+	Node->RefreshScript();
+	Widget->UpdateGraphNode();
+	Selector = GetSelector();
+	if (TestTrue(TEXT("Explicit export is selected"), Selector->GetSelectedItem().IsValid()))
+	{
+		TestEqual(TEXT("Explicit selection remains intact"), *Selector->GetSelectedItem(), FString(TEXT("Second")));
+	}
+	Node->SelectedFunction.Reset();
+	Node->OnScriptChanged(TEXT("fn Only*() {}"));
+	Widget->UpdateGraphNode();
+	TestTrue(TEXT("Returning to one export hides the selector"), GetSelector()->GetVisibility() == EVisibility::Collapsed);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FUEmkaOptionsDetailsPresentationTest, "UEmka.Editor.Options.DetailsPresentation",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FUEmkaOptionsDetailsPresentationTest::RunTest(const FString& Parameters)
+{
+	FProperty* PreserveProperty = FUEmkaExecutionOptions::StaticStruct()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(FUEmkaExecutionOptions, bUseSession));
+	if (!TestNotNull(TEXT("Serialized session option remains reflected"), PreserveProperty)) return false;
+	TestEqual(TEXT("Session option has the requested display name"), PreserveProperty->GetDisplayNameText().ToString(), FString(TEXT("Preserve Script State")));
+	TestEqual(TEXT("Session tooltip comes from its concise comment"), PreserveProperty->GetToolTipText().ToString(), FString(TEXT("Keep script globals between calls on this node and Blueprint instance.")));
+	for (const FName Name : {GET_MEMBER_NAME_CHECKED(FUEmkaExecutionOptions, bUseSession), GET_MEMBER_NAME_CHECKED(FUEmkaExecutionOptions, MaxInstructions),
+		GET_MEMBER_NAME_CHECKED(FUEmkaExecutionOptions, MaxHeapBytes), GET_MEMBER_NAME_CHECKED(FUEmkaExecutionOptions, bResetSession)})
+	{
+		FProperty* Property = FUEmkaExecutionOptions::StaticStruct()->FindPropertyByName(Name);
+		if (!TestNotNull(TEXT("Execution option remains reflected"), Property)) return false;
+		TestEqual(TEXT("Execution options use the flat Umka category"), Property->GetMetaData(TEXT("Category")), FString(TEXT("Umka")));
+		TestFalse(TEXT("Execution option comments generate tooltips"), Property->GetToolTipText().IsEmpty());
+	}
+	FProperty* StructProperty = UK2Node_UEmka::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, bNativeStructPins));
+	FProperty* StatusProperty = UK2Node_UEmka::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UK2Node_UEmka, bExposeRuntimeStatus));
+	if (!TestNotNull(TEXT("Custom struct option remains reflected"), StructProperty) || !TestNotNull(TEXT("Status option remains reflected"), StatusProperty)) return false;
+	TestEqual(TEXT("Custom struct option has an explicit display name"), StructProperty->GetDisplayNameText().ToString(), FString(TEXT("Use Custom Struct Pins")));
+	TestEqual(TEXT("Status option describes the visible pins"), StatusProperty->GetDisplayNameText().ToString(), FString(TEXT("Show Success and Error Pins")));
+	TestFalse(TEXT("Custom struct comment generates its tooltip"), StructProperty->GetToolTipText().IsEmpty());
+	TestFalse(TEXT("Status comment generates its tooltip"), StatusProperty->GetToolTipText().IsEmpty());
+
+	UK2Node_UEmka* Node = MakeOptionsNode();
+	FDetailsViewArgs Args;
+	Args.bUpdatesFromSelection = false;
+	Args.bAllowSearch = false;
+	Args.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+	const TSharedRef<IDetailsView> View = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor")).CreateDetailView(Args);
+	View->SetObject(Node);
+	FSlateApplication& Application = FSlateApplication::Get();
+	const TSharedPtr<SWidget> PreviousFocus = Application.GetKeyboardFocusedWidget();
+	const TSharedRef<SVirtualWindow> Window = SNew(SVirtualWindow).Size(FVector2D(800, 800));
+	Window->SetContent(View);
+	Window->SetIsFocusable(true);
+	Application.RegisterVirtualWindow(Window);
+	ON_SCOPE_EXIT
+	{
+		if (PreviousFocus.IsValid()) Application.SetKeyboardFocus(PreviousFocus);
+		else Application.ClearKeyboardFocus();
+		Application.UnregisterVirtualWindow(Window);
+	};
+	Application.Tick(ESlateTickType::TimeAndWidgets);
+	View->SlatePrepass(1.f);
+	FSlateWindowElementList Elements(Window);
+	FHittestGrid HitTestGrid;
+	const FPaintArgs PaintArgs(&Window.Get(), HitTestGrid, FVector2D::ZeroVector, Application.GetCurrentTime(), Application.GetDeltaTime());
+	View->Paint(PaintArgs, FGeometry::MakeRoot(FVector2D(800, 800), FSlateLayoutTransform()),
+		FSlateRect(0, 0, 800, 800), Elements, 0, FWidgetStyle(), true);
+	for (const FString& Label : {FString(TEXT("Umka")), FString(TEXT("Preserve Script State")), FString(TEXT("Max Instructions")), FString(TEXT("Max Heap Bytes")),
+		FString(TEXT("Use Custom Struct Pins")), FString(TEXT("Show Success and Error Pins"))})
+	{
+		TestTrue(*FString::Printf(TEXT("Actual Details view shows '%s'"), *Label), FindOptionsText(View, Label).IsValid());
+	}
+	TestFalse(TEXT("Actual Details view has no Execution subsection"), FindOptionsText(View, TEXT("Execution")).IsValid());
+	TestFalse(TEXT("Actual Details view no longer shows Use Session"), FindOptionsText(View, TEXT("Use Session")).IsValid());
+	TSharedPtr<SWidget> PreserveRow = FindOptionsText(View, TEXT("Preserve Script State"));
+	while (PreserveRow.IsValid() && PreserveRow->GetType() != TEXT("SDetailSingleItemRow")) PreserveRow = PreserveRow->GetParentWidget();
+	if (!TestTrue(TEXT("Preserve option belongs to a native Details row"), PreserveRow.IsValid())) return false;
+	const TSharedPtr<SWidget> BoolEditor = FindOptionsWidget(PreserveRow.ToSharedRef(), TEXT("SPropertyEditorBool"));
+	if (!TestTrue(TEXT("Preserve row contains its native boolean property editor"), BoolEditor.IsValid())) return false;
+	const TSharedPtr<SWidget> FoundCheckbox = FindOptionsWidget(BoolEditor.ToSharedRef(), TEXT("SCheckBox"));
+	if (!TestTrue(TEXT("Preserve row contains its actual checkbox"), FoundCheckbox.IsValid())) return false;
+	const TSharedPtr<SCheckBox> Checkbox = StaticCastSharedPtr<SCheckBox>(FoundCheckbox);
+	TestFalse(TEXT("Script state preservation defaults off"), Checkbox->IsChecked());
+	TestNull(TEXT("Fresh-call node has no reset state pin"), Node->FindPin(TEXT("ResetSession")));
+	Checkbox->ToggleCheckedState();
+	TestTrue(TEXT("Actual Details checkbox updates the serialized option"), Node->ExecutionOptions.bUseSession);
+	UEdGraphPin* ResetPin = Node->FindPin(TEXT("ResetSession"));
+	if (!TestNotNull(TEXT("Enabling preservation reconstructs the reset pin"), ResetPin)) return false;
+	TestEqual(TEXT("Reset pin retains its serialized internal name"), ResetPin->PinName, FName(TEXT("ResetSession")));
+	TestEqual(TEXT("Reset pin shows the clearer label"), ResetPin->PinFriendlyName.ToString(), FString(TEXT("Reset Script State")));
+	TestEqual(TEXT("Reset pin explains its node and instance scope"), ResetPin->PinToolTip, FString(TEXT("Clear this node's saved script state for this Blueprint instance before this call.")));
 	return true;
 }
 

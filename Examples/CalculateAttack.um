@@ -1,0 +1,23 @@
+type AttackInput = struct {
+    Damage, Armor: real
+    Critical: bool
+    CriticalMultiplier: real
+}
+
+type AttackResult = struct {
+    Damage: real
+    WasCritical: bool
+}
+
+fn CalculateAttack*(Attack: AttackInput): AttackResult {
+    damage := Attack.Damage
+    armor := Attack.Armor
+    multiplier := Attack.CriticalMultiplier
+    if damage < 0 { damage = 0 }
+    if armor < 0 { armor = 0 }
+    if multiplier < 1 { multiplier = 1 }
+    if Attack.Critical { damage *= multiplier }
+    damage -= armor
+    if damage < 0 { damage = 0 }
+    return AttackResult{damage, Attack.Critical}
+}

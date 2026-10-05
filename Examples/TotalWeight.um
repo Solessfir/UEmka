@@ -1,0 +1,7 @@
+fn TotalWeight*(Weights: []real): real {
+    total := 0.0
+    for index := 0; index < len(Weights); index++ {
+        if Weights[index] > 0 { total += Weights[index] }
+    }
+    return total
+}

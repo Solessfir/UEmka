@@ -1,0 +1,6 @@
+fn AdvanceCooldown*(Remaining: real, DeltaSeconds: real): (real, bool) {
+    if DeltaSeconds < 0 { DeltaSeconds = 0 }
+    updated := Remaining - DeltaSeconds
+    if updated <= 0 { return 0, true }
+    return updated, false
+}

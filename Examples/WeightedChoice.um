@@ -1,0 +1,23 @@
+fn WeightedChoice*(Weights: []real, Roll: real): int32 {
+    total := 0.0
+    var last: int32 = -1
+    for index := 0; index < len(Weights); index++ {
+        if Weights[index] > 0 {
+            total += Weights[index]
+            last = int32(index)
+        }
+    }
+    if last < 0 { return -1 }
+    if Roll < 0 { Roll = 0 }
+    if Roll >= 1 { return last }
+
+    threshold := Roll * total
+    cumulative := 0.0
+    for index := 0; index < len(Weights); index++ {
+        if Weights[index] > 0 {
+            cumulative += Weights[index]
+            if threshold < cumulative { return int32(index) }
+        }
+    }
+    return last
+}

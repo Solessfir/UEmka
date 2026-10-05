@@ -237,6 +237,7 @@ bool FUEmkaDiagnosticLifecycleTest::RunTest(const FString& Parameters)
 	Node->PostLoad();
 	TestEqual(TEXT("PostLoad refreshes stored invalid script"), Node->LastErrorLine, 2);
 	Node->Script = TEXT("fn Restored*(Value: int): int { return Value }");
+	Node->SelectedFunction = TEXT("Restored");
 	Node->PostEditUndo();
 	TestTrue(TEXT("PostEditUndo clears stale diagnostics"), Node->LastErrorLine == -1 && Node->LastErrorMessage.IsEmpty());
 	const TArray<UEdGraphPin*> RestoredPins = Node->Pins;

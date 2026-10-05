@@ -26,6 +26,10 @@ The `*` makes the function callable from Blueprint. This example creates an Inte
 
 ![Example Blueprint](Resources/Screenshot.png)
 
+For ready-to-use gameplay examples, see [Starter script assets](Docs/Examples.md). The assets directly in `Content/Umka` contain editable **Source** and work without external `.um` files; duplicate one into your project's Content folder to customize it. Matching source files are in [Examples](Examples). The **FileBacked / HealthColor** asset demonstrates a link to `Examples/HealthColor.um`, with read-only **Source** and the linked path under **Import Settings**.
+
+Optionally drag an `Examples/*.um` file into your project's Content Browser folder to create a file-backed script asset. Its **Source** is read-only and **Import Settings** shows the linked file path. Edit the `.um` file and use **Reimport** to update the asset; [Unreal's Auto Reimport](Docs/Modules.md#importing-source-files) can reload changes from monitored folders automatically.
+
 ## Documentation
 
 | Guide | Topics |

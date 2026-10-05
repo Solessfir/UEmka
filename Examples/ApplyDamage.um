@@ -1,0 +1,8 @@
+fn ApplyDamage*(Health: real, Damage: real, MaxHealth: real = 100): real {
+    if MaxHealth < 0 { MaxHealth = 0 }
+    if Damage < 0 { Damage = 0 }
+    updated := Health - Damage
+    if updated < 0 { return 0 }
+    if updated > MaxHealth { return MaxHealth }
+    return updated
+}

@@ -75,18 +75,23 @@ struct FUEmkaExecutionOptions
 {
 	GENERATED_BODY()
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution")
+	// Keep script globals between calls on this node and Blueprint instance.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Umka", Meta = (DisplayName = "Preserve Script State"))
 	bool bUseSession = false;
 
-	// Zero leaves execution unlimited. Each call starts a new instruction budget.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution", Meta = (ClampMin = "0", UIMin = "0"))
+	// Maximum script instructions per call. Zero disables the instruction limit.
+	// Each call starts a new budget.
+	// Does not interrupt blocked native callbacks or built-in functions.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Umka", Meta = (ClampMin = "0", UIMin = "0"))
 	int64 MaxInstructions = 0;
 
-	// Caps reserved VM heap bytes, including fiber stacks. Zero leaves the heap unlimited.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UEmka|Execution", Meta = (ClampMin = "0", UIMin = "0"))
+	// Maximum memory reserved by the script, in bytes. Zero disables this memory limit.
+	// Includes retained allocations and fiber stacks; excludes compiler and Unreal memory.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Umka", Meta = (ClampMin = "0", UIMin = "0"))
 	int64 MaxHeapBytes = 0;
 
-	UPROPERTY(BlueprintReadWrite, Category = "UEmka|Execution")
+	// Start this call with fresh script globals, even when state preservation is enabled.
+	UPROPERTY(BlueprintReadWrite, Category = "Umka", Meta = (DisplayName = "Reset Script State"))
 	bool bResetSession = false;
 };
 

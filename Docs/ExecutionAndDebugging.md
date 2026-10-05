@@ -14,17 +14,17 @@ See [Writing Scripts](WritingScripts.md) for supported signatures and [Modules](
 
 ## Runtime status
 
-Enable **Expose Runtime Status** in Details to add `Success` and `Error` output pins. Execution continues through `Then` on either outcome; failed calls clear their value outputs. Runtime errors include an Umka call stack.
+Enable **Show Success and Error Pins** in Details to add `Success` and `Error` output pins. Execution continues through `Then` on either outcome; failed calls clear their value outputs. Runtime errors include an Umka call stack.
 
 Status outputs use `RuntimeSuccess` or `RuntimeError` when a return field already uses `Success` or `Error`; a numeric suffix resolves further collisions.
 
 ## Instruction limits and cancellation
 
-**Execution Options > Max Instructions** limits VM instructions per call, including loops, fibers, and nested calls. Zero keeps execution unlimited. The C++ `CancelExecution(Caller, SessionId)` API can request cancellation from another thread; the VM checks at the first instruction and every 1,024 instructions. Neither control interrupts a native callback or builtin while it is blocked.
+**Umka > Max Instructions** limits VM instructions per call, including loops, fibers, and nested calls. Zero disables the instruction limit. The C++ `CancelExecution(Caller, SessionId)` API can request cancellation from another thread; the VM checks at the first instruction and every 1,024 instructions. Neither control interrupts a native callback or builtin while it is blocked.
 
-## Persistent sessions
+## Preserving script state
 
-Enable **Use Session** to reuse the compiled VM and preserve global state between calls. Sessions belong to a caller and node GUID, so separate Blueprint instances and nodes remain independent. Changing the script, selected function, or any asset module source rebuilds the VM. A fatal runtime error also rebuilds it on the next call. Session imports must come from script assets, builtin modules, or registered host modules; loose file imports are disabled in this mode. Fresh execution remains the default.
+Enable **Preserve Script State** under **Umka** to keep script globals between calls on the same node and Blueprint instance. Other nodes and Blueprint instances have independent state, even when they use the same script asset. The compiled VM is reused for these calls. Changing the script, selected function, or any asset module source rebuilds the VM. A fatal runtime error also rebuilds it on the next call. Imports must come from script assets, builtin modules, or registered host modules; loose file imports are disabled in this mode. Fresh execution remains the default.
 
 ```umka
 var Calls: int
@@ -35,9 +35,9 @@ fn count*(): int {
 }
 ```
 
-With the default fresh execution, each call returns `1`. With **Use Session** enabled, repeated calls on the same node and Blueprint instance return `1`, `2`, `3`, and so on.
+With the default fresh execution, each call returns `1`. With **Preserve Script State** enabled, repeated calls on the same node and Blueprint instance return `1`, `2`, `3`, and so on.
 
-Enabling **Use Session** adds a **Reset Session** Boolean input. Set it to `true` to discard this node's state for the current caller before that execution. Keep it `false` to preserve state. The input remains independent of script parameters with the same name.
+Enabling **Preserve Script State** adds a **Reset Script State** Boolean input. Set it to `true` to discard this node's state for the current Blueprint instance before that execution. Keep it `false` to preserve state. The input remains independent of script parameters with the same name.
 
 The Blueprint **Reset Runtime Sessions For Caller** node resets all sessions belonging to its `Caller`, which defaults to the current Blueprint instance. It returns the number of sessions reset. **Reset All Runtime Sessions** resets sessions for every caller. The C++ `ResetRuntimeSession(Caller, SessionId)` API resets one node and returns whether it found a session.
 
@@ -45,7 +45,7 @@ Resetting an active session requests cancellation and destroys its VM only after
 
 ## VM heap limits
 
-**Execution Options > Max Heap Bytes** caps the VM's reserved heap memory, including heap page headers, retained recycled pages, and fiber stacks. Zero keeps the heap unlimited. The budget applies before compilation, while parameters are marshaled, and during script execution. A retained session keeps its heap between calls, so lowering its budget below its current reservation fails that call.
+**Umka > Max Heap Bytes** caps the VM's reserved heap memory, including heap page headers, retained recycled pages, and fiber stacks. Zero disables this memory limit. The budget applies before compilation, while parameters are marshaled, and during script execution. Preserved script state retains its heap between calls, so lowering its budget below its current reservation fails that call.
 
 This limit excludes the compiler's general storage and Unreal-side parameter and result containers. The VM needs memory for its initial stack even when a script allocates nothing, so allow room for that baseline. Exceeding the cap reports `Heap budget exceeded`, clears output values, and rebuilds a failed session on its next call.
 

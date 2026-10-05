@@ -1,0 +1,6 @@
+var Calls: int32
+
+fn StatefulCounter*(): int32 {
+    Calls++
+    return Calls
+}

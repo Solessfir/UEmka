@@ -1,0 +1,10 @@
+import "ue.um"
+
+fn MoveWithVelocity*(Position: ue::Vector, Velocity: ue::Vector, DeltaSeconds: real): ue::Vector {
+    if DeltaSeconds < 0 { DeltaSeconds = 0 }
+    return ue::Vector{
+        Position.X + Velocity.X * DeltaSeconds,
+        Position.Y + Velocity.Y * DeltaSeconds,
+        Position.Z + Velocity.Z * DeltaSeconds
+    }
+}

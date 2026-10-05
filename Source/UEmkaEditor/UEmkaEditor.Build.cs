@@ -20,6 +20,8 @@ public class UEmkaEditor : ModuleRules
 		{
 			"UmkaLib",
 			"UnrealEd",
+			"AssetDefinition",
+			"PropertyEditor",
 			"BlueprintGraph",
 			"GraphEditor",
 			"Slate",

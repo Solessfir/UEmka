@@ -1,0 +1,6 @@
+import "ue.um"
+
+fn RotateYaw*(Rotation: ue::Rotator, DegreesPerSecond: real = 90, DeltaSeconds: real = 0): ue::Rotator {
+    if DeltaSeconds < 0 { DeltaSeconds = 0 }
+    return ue::Rotator{Rotation.Pitch, Rotation.Yaw + DegreesPerSecond * DeltaSeconds, Rotation.Roll}
+}

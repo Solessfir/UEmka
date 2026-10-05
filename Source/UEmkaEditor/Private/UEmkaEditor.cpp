@@ -3,8 +3,10 @@
 #include "UEmkaEditor.h"
 #include "EdGraphUtilities.h"
 #include "K2Node_UEmka.h"
+#include "PropertyEditorModule.h"
 #include "SGraphNode_UEmka.h"
 #include "UEmkaScriptAsset.h"
+#include "UEmkaScriptAssetDetails.h"
 #include "UObject/UObjectIterator.h"
 
 #define LOCTEXT_NAMESPACE "FUEmkaEditorModule"
@@ -24,6 +26,11 @@ public:
 
 void FUEmkaEditorModule::StartupModule()
 {
+	FPropertyEditorModule& PropertyEditor = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+	PropertyEditor.RegisterCustomClassLayout(UUEmkaScriptAsset::StaticClass()->GetFName(),
+		FOnGetDetailCustomizationInstance::CreateStatic(&FUEmkaScriptAssetDetails::MakeInstance));
+	PropertyEditor.NotifyCustomizationModuleChanged();
+
 	NodeFactory = MakeShareable(new FUEmkaNodeFactory());
 	FEdGraphUtilities::RegisterVisualNodeFactory(NodeFactory);
 	ScriptAssetChangedHandle = UUEmkaScriptAsset::OnScriptAssetChanged.AddLambda([](UUEmkaScriptAsset* Asset)
@@ -40,6 +47,13 @@ void FUEmkaEditorModule::StartupModule()
 
 void FUEmkaEditorModule::ShutdownModule()
 {
+	if (FModuleManager::Get().IsModuleLoaded("PropertyEditor"))
+	{
+		FPropertyEditorModule& PropertyEditor = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		PropertyEditor.UnregisterCustomClassLayout(UUEmkaScriptAsset::StaticClass()->GetFName());
+		PropertyEditor.NotifyCustomizationModuleChanged();
+	}
+
 	UUEmkaScriptAsset::OnScriptAssetChanged.Remove(ScriptAssetChangedHandle);
 	FEdGraphUtilities::UnregisterVisualNodeFactory(NodeFactory);
 	NodeFactory.Reset();

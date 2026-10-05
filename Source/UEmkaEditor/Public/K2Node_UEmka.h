@@ -120,19 +120,27 @@ public:
 	UPROPERTY()
 	FString Script = TEXT("fn Hello*(Str: str): str {\n    res := \"Hello \" + Str\n    printf(\"%s\", res)\n    return res\n}");
 
+	// Reuse code from this asset instead of the node's inline script.
 	UPROPERTY(EditAnywhere, Category = "Umka")
 	TObjectPtr<UUEmkaScriptAsset> ScriptAsset;
 
-	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Exported function to call. Leave empty to use the first exported function."))
+	// Exported function to call.
+	// Assigning an asset selects its first exported function; source edits preserve the current function while it exists.
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (GetOptions = "GetSelectedFunctionOptions"))
 	FString SelectedFunction;
 
-	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Use native Blueprint structs instead of flattening individual struct parameters and results."))
+	// Use one Blueprint struct pin for each custom script struct instead of separate field pins.
+	// Engine structs such as Vector and Rotator are always native.
+	// Changing this option can require reconnecting existing pins.
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (DisplayName = "Use Custom Struct Pins"))
 	bool bNativeStructPins = false;
 
 	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ShowOnlyInnerProperties))
 	FUEmkaExecutionOptions ExecutionOptions;
 
-	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (ToolTip = "Expose Success and Error outputs for handling runtime failures."))
+	// Show Success and Error output pins for script calls.
+	// Then executes after success or failure. Failed calls clear result values.
+	UPROPERTY(EditAnywhere, Category = "Umka", Meta = (DisplayName = "Show Success and Error Pins"))
 	bool bExposeRuntimeStatus = false;
 
 	// UK2Node interface
@@ -167,9 +175,11 @@ public:
 
 	// Called by SGraphNode_UEmka when the code editor text is committed.
 	void OnScriptChanged(const FString& NewScript);
-	void RefreshScript();
+	void RefreshScript(bool bUpdateFunctionSelection = false);
 	void OnScriptAssetChanged(UUEmkaScriptAsset* ChangedAsset);
 	FString GetScriptSource() const;
+	UFUNCTION()
+	TArray<FString> GetSelectedFunctionOptions() const;
 	bool CompileCurrentScript(const FString& Source, FString& OutError, int32& OutLine) const;
 	static TArray<FString> GetExportedFunctions(const FString& Source);
 

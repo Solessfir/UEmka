@@ -1,0 +1,9 @@
+import "ue.um"
+
+fn HealthColor*(Health: real, MaxHealth: real = 100): ue::LinearColor {
+    if MaxHealth <= 0 { return ue::LinearColor{1, 0, 0, 1} }
+    fraction := Health / MaxHealth
+    if fraction < 0 { fraction = 0 }
+    if fraction > 1 { fraction = 1 }
+    return ue::LinearColor{real32(1 - fraction), real32(fraction), 0, 1}
+}

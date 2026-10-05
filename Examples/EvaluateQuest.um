@@ -1,0 +1,8 @@
+fn EvaluateQuest*(Objectives: []bool): (real, bool) {
+    if len(Objectives) == 0 { return 0, false }
+    completed := 0
+    for index := 0; index < len(Objectives); index++ {
+        if Objectives[index] { completed++ }
+    }
+    return real(completed) / real(len(Objectives)), completed == len(Objectives)
+}

@@ -26,7 +26,9 @@ Fields may contain supported scalars, arrays, maps, and nested structs. Nested s
 
 Struct arrays use native Blueprint struct arrays. Their element types are generated from the compiled field layout and saved with the owning Blueprint package. Fields in these native structs can include nested structs, arrays, and maps. Identical field layouts share a generated type within the package.
 
-Enable **Native Struct Pins** in the node's Details panel to pass individual structs through one native Blueprint pin. Standard Make/Break and split-pin workflows are available. Structs in return tuples then occupy one output pin each. Existing nodes retain flattened pins by default. Compiler defaults populate native input pins, including nested fields, and edited defaults override them.
+Enable **Use Custom Struct Pins** in the node's Details panel to pass individual custom structs through one native Blueprint pin. Standard Make/Break and split-pin workflows are available. Custom structs in return tuples then occupy one output pin each. Existing nodes retain flattened custom fields by default. Compiler defaults populate native input pins, including nested fields, and edited defaults override them. Built-in `ue.um` structs such as Vector and Rotator always use their Unreal struct pins, regardless of this option.
+
+Native pins keep related fields together and work well when passing a complete struct. Custom native struct types are generated from the field layout and saved inside the owning Blueprint package; a layout change can change the pin type and require reconnecting links. Flattened pins avoid generated struct types and let scalar fields connect directly to existing logic. Changing this option on a wired node may also require reconnecting its pins.
 
 ### Constraints
 

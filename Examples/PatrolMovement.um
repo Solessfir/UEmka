@@ -1,0 +1,20 @@
+import "ue.um"
+
+fn PatrolMovement*(Position: ue::Vector, Waypoints: []ue::Vector, WaypointIndex: int32, Speed: real, DeltaSeconds: real): (ue::Vector, int32) {
+    if len(Waypoints) == 0 { return Position, -1 }
+    if WaypointIndex < 0 || WaypointIndex >= len(Waypoints) { WaypointIndex = 0 }
+    if Speed <= 0 || DeltaSeconds <= 0 { return Position, WaypointIndex }
+
+    target := Waypoints[WaypointIndex]
+    dx := target.X - Position.X
+    dy := target.Y - Position.Y
+    dz := target.Z - Position.Z
+    distance := sqrt(dx * dx + dy * dy + dz * dz)
+    step := Speed * DeltaSeconds
+    if distance <= step {
+        // Stop at one waypoint per call so large frame times cannot skip targets.
+        return target, int32((WaypointIndex + 1) % len(Waypoints))
+    }
+    fraction := step / distance
+    return ue::Vector{Position.X + dx * fraction, Position.Y + dy * fraction, Position.Z + dz * fraction}, WaypointIndex
+}
